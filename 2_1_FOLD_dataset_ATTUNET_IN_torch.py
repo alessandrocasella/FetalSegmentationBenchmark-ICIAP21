@@ -357,7 +357,7 @@ class AttUnet(nn.Module):
         self.down_conv4 = DownBlock(256, 512)
 
         self.double_conv = DoubleConv(512, 1024)
-
+        self.batchnorm = nn.BatchNorm2d(64, affine=True)
         self.up_conv4 = AttUp(1024, 512)
         self.up_conv3 = AttUp(512, 256)
         self.up_conv2 = AttUp(256, 128)
@@ -374,6 +374,7 @@ class AttUnet(nn.Module):
         x = self.up_conv3(x, skip3_out)
         x = self.up_conv2(x, skip2_out)
         x = self.up_conv1(x, skip1_out)
+        x = self.batchnorm(x)
         x = self.conv_last(x)
         return x
 
