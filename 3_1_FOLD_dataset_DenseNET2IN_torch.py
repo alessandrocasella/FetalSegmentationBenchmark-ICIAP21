@@ -1,14 +1,15 @@
 ''' CHANGE THE NAME OF:
                         THE K FOLD DATASET IN LINE 22
                         THE NAME OF THE RESULT DATASET PATH IN LINE 90'''
-
-
+import math
 import os
 import random
+from typing import Optional, Sequence, Union
 
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.nn import init
 import torch.optim as optim
 import torchvision
 from PIL import Image
@@ -83,7 +84,7 @@ print(val_path_mask_list)
 
 
 Result_path = os.path.join(os.getcwd(),'RESULTS')
-result_model_path = os.path.join(Result_path, 'DENSENET')
+result_model_path = os.path.join(Result_path, 'DENSE_IN')
 result_dataset_path = os.path.join(result_model_path, 'K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET')
 try:
     os.mkdir(Result_path)
@@ -99,337 +100,360 @@ print(Result_path)
 print(result_model_path)
 print(result_dataset_path)
 
-
-class PreActivateDoubleConv(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(PreActivateDoubleConv, self).__init__()
-        self.double_conv = nn.Sequential(
-            nn.BatchNorm2d(in_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
-        )
-
-    def forward(self, x):
-        return self.double_conv(x)
-
-class PreActivateResUpBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(PreActivateResUpBlock, self).__init__()
-        self.ch_avg = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, bias=False),
-            nn.BatchNorm2d(out_channels))
-        self.up_sample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
-        self.ch_avg = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, bias=False),
-            nn.BatchNorm2d(out_channels))
-        self.double_conv = PreActivateDoubleConv(in_channels, out_channels)
-
-    def forward(self, down_input, skip_input):
-        x = self.up_sample(down_input)
-        x = torch.cat([x, skip_input], dim=1)
-        return self.double_conv(x) + self.ch_avg(x)
-
-class PreActivateResBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(PreActivateResBlock, self).__init__()
-        self.ch_avg = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, bias=False),
-            nn.BatchNorm2d(out_channels))
-
-        self.double_conv = PreActivateDoubleConv(in_channels, out_channels)
-        self.down_sample = nn.MaxPool2d(2)
-
-    def forward(self, x):
-        identity = self.ch_avg(x)
-        out = self.double_conv(x)
-        out = out + identity
-        return self.down_sample(out), out
-
-class DoubleConv(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(DoubleConv, self).__init__()
-        self.double_conv = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-        )
-
-    def forward(self, x):
-        return self.double_conv(x)
-
-class ResBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(ResBlock, self).__init__()
-        self.downsample = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, bias=False),
-            nn.BatchNorm2d(out_channels))
-        self.double_conv = DoubleConv(in_channels, out_channels)
-        self.down_sample = nn.MaxPool2d(2)
-        self.relu = nn.ReLU()
-
-    def forward(self, x):
-        identity = self.downsample(x)
-        out = self.double_conv(x)
-        out = self.relu(out + identity)
-        return self.down_sample(out), out
-
-
-class DownBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(DownBlock, self).__init__()
-        self.double_conv = DoubleConv(in_channels, out_channels)
-        self.down_sample = nn.MaxPool2d(2)
-
-    def forward(self, x):
-        skip_out = self.double_conv(x)
-        down_out = self.down_sample(skip_out)
-        return down_out, skip_out
-
-class UpBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(UpBlock, self).__init__()
-        self.up_sample = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2)
-        self.double_conv = DoubleConv(in_channels, out_channels)
-
-    def forward(self, down_input, skip_input):
-        x = self.up_sample(down_input)
-        x = torch.cat([x, skip_input], dim=1)
-        return self.double_conv(x)
-
-
-class Attention_block(nn.Module):
-    def __init__(self, F_g, F_l, F_int):
-        super(Attention_block, self).__init__()
-        self.W_g = nn.Sequential(
-            nn.Conv2d(F_g, F_int, kernel_size=1, stride=1, padding=0, bias=True),
-            nn.BatchNorm2d(F_int)
-        )
-
-        self.W_x = nn.Sequential(
-            nn.Conv2d(F_l, F_int, kernel_size=1, stride=1, padding=0, bias=True),
-            nn.BatchNorm2d(F_int)
-        )
-
-        self.psi = nn.Sequential(
-            nn.Conv2d(F_int, 1, kernel_size=1, stride=1, padding=0, bias=True),
-            nn.BatchNorm2d(1),
-            nn.Sigmoid()
-        )
-
-        self.relu = nn.ReLU(inplace=True)
-
-    def forward(self, g, x):
-        g1 = self.W_g(g)
-        x1 = self.W_x(x)
-        psi = self.relu(g1 + x1)
-        psi = self.psi(psi)
-
-        return x * psi
-
-class AttUp(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(AttUp, self).__init__()
-        self.att_block = Attention_block(out_channels, out_channels, out_channels//2)
-        self.up_sample = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2)
-        self.double_conv = DoubleConv(in_channels, out_channels)
-    def forward(self, down_input, skip_input):
-        x = self.up_sample(down_input)
-        skip_input = self.att_block(x, skip_input)
-        x = torch.cat([x, skip_input], dim=1)
-        return self.double_conv(x)
-
-class DenseLayer(nn.Sequential):
-    def __init__(self, in_channels, growth_rate):
-        super().__init__()
-        self.add_module('norm', nn.BatchNorm2d(in_channels))
-        self.add_module('relu', nn.ReLU(True))
-        self.add_module('conv', nn.Conv2d(in_channels, growth_rate, kernel_size=3,
-                                          stride=1, padding=1, bias=True))
-        self.add_module('drop', nn.Dropout2d(0.2))
-
-    def forward(self, x):
-        return super().forward(x)
-
-
-class DenseBlock(nn.Module):
-    def __init__(self, in_channels, growth_rate, n_layers, upsample=False):
-        super().__init__()
-        self.upsample = upsample
-        self.layers = nn.ModuleList([DenseLayer(
-            in_channels + i*growth_rate, growth_rate)
-            for i in range(n_layers)])
-
-    def forward(self, x):
-        if self.upsample:
-            new_features = []
-            #we pass all previous activations into each dense layer normally
-            #But we only store each dense layer's output in the new_features array
-            for layer in self.layers:
-                out = layer(x)
-                x = torch.cat([x, out], 1)
-                new_features.append(out)
-            return torch.cat(new_features,1)
-        else:
-            for layer in self.layers:
-                out = layer(x)
-                x = torch.cat([x, out], 1) # 1 = channel axis
-            return x
-
-
 class TransitionDown(nn.Sequential):
-    def __init__(self, in_channels):
-        super().__init__()
-        self.add_module('norm', nn.BatchNorm2d(num_features=in_channels))
+    r"""
+    Transition Down Block as described in [FCDenseNet](https://arxiv.org/abs/1611.09326),
+    plus compression from [DenseNet](https://arxiv.org/abs/1608.06993)
+    Consists of:
+    - Batch Normalization
+    - ReLU
+    - 1x1 Convolution (with optional compression of the number of channels)
+    - (Dropout)
+    - 2x2 Max Pooling
+    """
+
+    def __init__(self, in_channels: int, compression: float = 1.0, dropout: float = 0.0):
+        super(TransitionDown, self).__init__()
+
+        if not 0.0 < compression <= 1.0:
+            raise ValueError(f'Compression must be in (0, 1] range, got {compression}')
+
+        self.in_channels = in_channels
+        self.dropout = dropout
+        self.compression = compression
+        self.out_channels = int(math.ceil(compression * in_channels))
+
+        self.add_module('norm', nn.InstanceNorm2d(affine=True, num_features=in_channels))
         self.add_module('relu', nn.ReLU(inplace=True))
-        self.add_module('conv', nn.Conv2d(in_channels, in_channels,
-                                          kernel_size=1, stride=1,
-                                          padding=0, bias=True))
-        self.add_module('drop', nn.Dropout2d(0.2))
-        self.add_module('maxpool', nn.MaxPool2d(2))
+        self.add_module('conv', nn.Conv2d(in_channels, self.out_channels, kernel_size=1, bias=False))
 
-    def forward(self, x):
-        return super().forward(x)
+        if dropout > 0:
+            self.add_module('drop', nn.Dropout2d(dropout))
 
+        self.add_module('pool', nn.MaxPool2d(kernel_size=2, stride=2))
 
 class TransitionUp(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.att_block = Attention_block(out_channels, out_channels, out_channels // 2)
-        self.convTrans = nn.ConvTranspose2d(
-            in_channels=in_channels, out_channels=out_channels,
-            kernel_size=3, stride=2, padding=0, bias=True)
+    r"""
+    Transition Up Block as described in [FCDenseNet](https://arxiv.org/abs/1611.09326)
+    The block upsamples the feature map and concatenates it with the feature map coming from the skip connection.
+    If the two maps don't overlap perfectly they are first aligened centrally and cropped to match.
+    """
 
-    def forward(self, x, skip):
-        out = self.convTrans(x)
-        out = center_crop(out, skip.size(2), skip.size(3))
-        out = torch.cat([out, skip], 1)
-        return out
+    def __init__(self, upsample_channels: int, skip_channels: Optional[int] = None):
+        r"""
+        :param upsample_channels: number of channels from the upsampling path
+        :param skip_channels: number of channels from the skip connection, it is not required,
+                              but if specified allows to statically compute the number of output channels
+        """
+        super(TransitionUp, self).__init__()
 
+        self.upsample_channels = upsample_channels
+        self.skip_channels = skip_channels
+        self.out_channels = upsample_channels + skip_channels if skip_channels is not None else None
+
+        self.add_module('upconv', nn.ConvTranspose2d(self.upsample_channels, self.upsample_channels,
+                                                  kernel_size=3, stride=2, padding=0, bias=True))
+        self.add_module('concat', CenterCropConcat())
+
+    def forward(self, upsample, skip):
+        if self.skip_channels is not None and skip.shape[1] != self.skip_channels:
+            raise ValueError(f'Number of channels in the skip connection input ({skip.shape[1]}) '
+                             f'is different from the expected number of channels ({self.skip_channels})')
+        res = self.upconv(upsample)
+        res = self.concat(res, skip)
+        return res
+
+
+class CenterCropConcat(nn.Module):
+    def forward(self, x, y):
+        if x.shape[0] != y.shape[0]:
+            raise ValueError(f'x and y inputs contain a different number of samples')
+        height = min(x.size(2), y.size(2))
+        width = min(x.size(3), y.size(3))
+
+        x = self.center_crop(x, height, width)
+        y = self.center_crop(y, height, width)
+
+        res = torch.cat([x, y], dim=1)
+        return res
+
+    @staticmethod
+    def center_crop(x, target_height, target_width):
+        current_height = x.size(2)
+        current_width = x.size(3)
+        min_h = (current_width - target_width) // 2
+        min_w = (current_height - target_height) // 2
+        return x[:, :, min_w:(min_w + target_height), min_h:(min_h + target_width)]
 
 class Bottleneck(nn.Sequential):
-    def __init__(self, in_channels, growth_rate, n_layers):
-        super().__init__()
-        self.add_module('bottleneck', DenseBlock(
-            in_channels, growth_rate, n_layers, upsample=True))
+    r"""
+    A 1x1 convolutional layer, followed by Batch Normalization and ReLU
+    """
 
-    def forward(self, x):
-        return super().forward(x)
+    def __init__(self, in_channels: int, out_channels: int):
+        super(Bottleneck, self).__init__()
 
+        self.in_channels = in_channels
+        self.out_channels = out_channels
 
-def center_crop(layer, max_height, max_width):
-    _, _, h, w = layer.size()
-    xy1 = (w - max_width) // 2
-    xy2 = (h - max_height) // 2
-    return layer[:, :, xy2:(xy2 + max_height), xy1:(xy1 + max_width)]
+        self.add_module('conv', nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False))
+        self.add_module('norm', nn.InstanceNorm2d(affine=True, num_features=out_channels))
+        self.add_module('relu', nn.ReLU(inplace=True))
+
+class DenseLayer(nn.Sequential):
+    r"""
+    Dense Layer as described in [DenseNet](https://arxiv.org/abs/1608.06993)
+    and implemented in https://github.com/liuzhuang13/DenseNet
+    Consists of:
+    - Batch Normalization
+    - ReLU
+    - (Bottleneck)
+    - 3x3 Convolution
+    - (Dropout)
+    """
+
+    def __init__(self, in_channels: int, out_channels: int,
+                 bottleneck_ratio: Optional[int] = None, dropout: float = 0.0):
+        super(DenseLayer, self).__init__()
+
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+
+        self.add_module('norm', nn.InstanceNorm2d(affine=True, num_features=in_channels))
+        self.add_module('relu', nn.ReLU(inplace=True))
+
+        if bottleneck_ratio is not None:
+            self.add_module('bottleneck', Bottleneck(in_channels, bottleneck_ratio * out_channels))
+            in_channels = bottleneck_ratio * out_channels
+
+        self.add_module('conv', nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False))
+
+        if dropout > 0:
+            self.add_module('drop', nn.Dropout2d(dropout, inplace=True))
+
+class DenseBlock(nn.Module):
+    r"""
+    Dense Block as described in [DenseNet](https://arxiv.org/abs/1608.06993)
+    and implemented in https://github.com/liuzhuang13/DenseNet
+    - Consists of several DenseLayer (possibly using a Bottleneck and Dropout) with the same output shape
+    - The first DenseLayer is fed with the block input
+    - Each subsequent DenseLayer is fed with a tensor obtained by concatenating the input and the output
+      of the previous DenseLayer on the channel axis
+    - The block output is the concatenation of the output of every DenseLayer, and optionally the block input,
+      so it will have a channel depth of (growth_rate * num_layers) or (growth_rate * num_layers + in_channels)
+    """
+
+    def __init__(self, in_channels: int, growth_rate: int, num_layers: int,
+                 concat_input: bool = False, dense_layer_params: Optional[dict] = None):
+        super(DenseBlock, self).__init__()
+
+        self.concat_input = concat_input
+        self.in_channels = in_channels
+        self.growth_rate = growth_rate
+        self.num_layers = num_layers
+        self.out_channels = growth_rate * num_layers
+        if self.concat_input:
+            self.out_channels += self.in_channels
+
+        if dense_layer_params is None:
+            dense_layer_params = {}
+
+        for i in range(num_layers):
+            self.add_module(
+                f'layer_{i}',
+                DenseLayer(in_channels=in_channels + i * growth_rate, out_channels=growth_rate, **dense_layer_params)
+            )
+
+    def forward(self, block_input):
+        layer_input = block_input
+        # empty tensor (not initialized) + shape=(0,)
+        layer_output = block_input.new_empty(0)
+
+        all_outputs = [block_input] if self.concat_input else []
+        for layer in self._modules.values():
+            layer_input = torch.cat([layer_input, layer_output], dim=1)
+            layer_output = layer(layer_input)
+            all_outputs.append(layer_output)
+
+        return torch.cat(all_outputs, dim=1)
+
 
 class FCDenseNet(nn.Module):
-    def __init__(self, in_channels=3, down_blocks=(5,5,5,5,5),
-                 up_blocks=(5,5,5,5,5), bottleneck_layers=5,
-                 growth_rate=16, out_chans_first_conv=48, n_classes=12):
-        super().__init__()
-        self.down_blocks = down_blocks
-        self.up_blocks = up_blocks
-        cur_channels_count = 0
-        skip_connection_channel_counts = []
+    r"""
+    The One Hundred Layers Tiramisu: Fully Convolutional DenseNets for Semantic Segmentation
+    https://arxiv.org/abs/1611.09326
+    In this paper, we extend DenseNets to deal with the problem of semantic segmentation. We achieve state-of-the-art
+    results on urban scene benchmark datasets such as CamVid and Gatech, without any further post-processing module nor
+    pretraining. Moreover, due to smart construction of the model, our approach has much less parameters than currently
+    published best entries for these datasets.
+    """
 
-        ## First Convolution ##
+    def __init__(self,
+                 in_channels: int = 3,
+                 out_channels: int = 1,
+                 initial_num_features: int = 48,
+                 dropout: float = 0.2,
 
-        self.add_module('firstconv', nn.Conv2d(in_channels=in_channels,
-                  out_channels=out_chans_first_conv, kernel_size=3,
-                  stride=1, padding=1, bias=True))
-        cur_channels_count = out_chans_first_conv
+                 down_dense_growth_rates: Union[int, Sequence[int]] = 16,
+                 down_dense_bottleneck_ratios: Union[Optional[int], Sequence[Optional[int]]] = None,
+                 down_dense_num_layers: Union[int, Sequence[int]] = (4, 5, 7, 10, 12),
+                 down_transition_compression_factors: Union[float, Sequence[float]] = 1.0,
 
-        #####################
-        # Downsampling path #
-        #####################
+                 middle_dense_growth_rate: int = 16,
+                 middle_dense_bottleneck: Optional[int] = None,
+                 middle_dense_num_layers: int = 15,
 
-        self.denseBlocksDown = nn.ModuleList([])
-        self.transDownBlocks = nn.ModuleList([])
-        for i in range(len(down_blocks)):
-            self.denseBlocksDown.append(
-                DenseBlock(cur_channels_count, growth_rate, down_blocks[i]))
-            cur_channels_count += (growth_rate*down_blocks[i])
-            skip_connection_channel_counts.insert(0,cur_channels_count)
-            self.transDownBlocks.append(TransitionDown(cur_channels_count))
+                 up_dense_growth_rates: Union[int, Sequence[int]] = 16,
+                 up_dense_bottleneck_ratios: Union[Optional[int], Sequence[Optional[int]]] = None,
+                 up_dense_num_layers: Union[int, Sequence[int]] = (12, 10, 7, 5, 4)):
+        super(FCDenseNet, self).__init__()
 
-        #####################
-        #     Bottleneck    #
-        #####################
+        # region Parameters handling
+        self.in_channels = in_channels
+        self.out_channels = out_channels
 
-        self.add_module('bottleneck',Bottleneck(cur_channels_count,
-                                     growth_rate, bottleneck_layers))
-        prev_block_channels = growth_rate*bottleneck_layers
-        cur_channels_count += prev_block_channels
+        if type(down_dense_growth_rates) == int:
+            down_dense_growth_rates = (down_dense_growth_rates,) * 5
+        if down_dense_bottleneck_ratios is None or type(down_dense_bottleneck_ratios) == int:
+            down_dense_bottleneck_ratios = (down_dense_bottleneck_ratios,) * 5
+        if type(down_dense_num_layers) == int:
+            down_dense_num_layers = (down_dense_num_layers,) * 5
+        if type(down_transition_compression_factors) == float:
+            down_transition_compression_factors = (down_transition_compression_factors,) * 5
 
-        #######################
-        #   Upsampling path   #
-        #######################
+        if type(up_dense_growth_rates) == int:
+            up_dense_growth_rates = (up_dense_growth_rates,) * 5
+        if up_dense_bottleneck_ratios is None or type(up_dense_bottleneck_ratios) == int:
+            up_dense_bottleneck_ratios = (up_dense_bottleneck_ratios,) * 5
+        if type(up_dense_num_layers) == int:
+            up_dense_num_layers = (up_dense_num_layers,) * 5
+        # endregion
 
-        self.transUpBlocks = nn.ModuleList([])
-        self.denseBlocksUp = nn.ModuleList([])
-        for i in range(len(up_blocks)-1):
-            self.transUpBlocks.append(TransitionUp(prev_block_channels, prev_block_channels))
-            cur_channels_count = prev_block_channels + skip_connection_channel_counts[i]
+        # region First convolution
+        # The Lasagne implementation uses convolution with 'same' padding, the PyTorch equivalent is padding=1
+        self.features = nn.Conv2d(in_channels, initial_num_features, kernel_size=3, padding=1, bias=False)
+        current_channels = self.features.out_channels
+        # endregion
 
-            self.denseBlocksUp.append(DenseBlock(
-                cur_channels_count, growth_rate, up_blocks[i],
-                    upsample=True))
-            prev_block_channels = growth_rate*up_blocks[i]
-            cur_channels_count += prev_block_channels
+        # region Downward path
+        # Pairs of Dense Blocks with input concatenation and TransitionDown layers
+        down_dense_params = [
+            {
+                'concat_input': True,
+                'growth_rate': gr,
+                'num_layers': nl,
+                'dense_layer_params': {
+                    'dropout': dropout,
+                    'bottleneck_ratio': br
+                }
+            }
+            for gr, nl, br in
+            zip(down_dense_growth_rates, down_dense_num_layers, down_dense_bottleneck_ratios)
+        ]
+        down_transition_params = [
+            {
+                'dropout': dropout,
+                'compression': c
+            } for c in down_transition_compression_factors
+        ]
+        skip_connections_channels = []
 
-        ## Final DenseBlock ##
+        self.down_dense = nn.Module()
+        self.down_trans = nn.Module()
+        down_pairs_params = zip(down_dense_params, down_transition_params)
+        for i, (dense_params, transition_params) in enumerate(down_pairs_params):
+            block = DenseBlock(current_channels, **dense_params)
+            current_channels = block.out_channels
+            self.down_dense.add_module(f'block_{i}', block)
 
-        self.transUpBlocks.append(TransitionUp(
-            prev_block_channels, prev_block_channels))
-        cur_channels_count = prev_block_channels + skip_connection_channel_counts[-1]
+            skip_connections_channels.append(block.out_channels)
 
-        self.denseBlocksUp.append(DenseBlock(
-            cur_channels_count, growth_rate, up_blocks[-1],
-                upsample=False))
-        cur_channels_count += growth_rate*up_blocks[-1]
+            transition = TransitionDown(current_channels, **transition_params)
+            current_channels = transition.out_channels
+            self.down_trans.add_module(f'trans_{i}', transition)
+        # endregion
 
-        ## Softmax ##
+        # region Middle block
+        # Renamed from "bottleneck" in the paper, to avoid confusion with the Bottleneck of DenseLayers
+        self.middle = DenseBlock(
+            current_channels,
+            middle_dense_growth_rate,
+            middle_dense_num_layers,
+            concat_input=True,
+            dense_layer_params={
+                'dropout': dropout,
+                'bottleneck_ratio': middle_dense_bottleneck
+            })
+        current_channels = self.middle.out_channels
+        # endregion
 
-        self.finalConv = nn.Conv2d(in_channels=cur_channels_count,
-               out_channels=n_classes, kernel_size=1, stride=1,
-                   padding=0, bias=True)
+        # region Upward path
+        # Pairs of TransitionUp layers and Dense Blocks without input concatenation
+        up_transition_params = [
+            {
+                'skip_channels': sc,
+            } for sc in reversed(skip_connections_channels)
+        ]
+        up_dense_params = [
+            {
+                'concat_input': False,
+                'growth_rate': gr,
+                'num_layers': nl,
+                'dense_layer_params': {
+                    'dropout': dropout,
+                    'bottleneck_ratio': br
+                }
+            }
+            for gr, nl, br in
+            zip(up_dense_growth_rates, up_dense_num_layers, up_dense_bottleneck_ratios)
+        ]
+
+        self.up_dense = nn.Module()
+        self.up_trans = nn.Module()
+        up_pairs_params = zip(up_transition_params, up_dense_params)
+        for i, (transition_params_up, dense_params_up) in enumerate(up_pairs_params):
+            transition = TransitionUp(current_channels, **transition_params_up)
+            current_channels = transition.out_channels
+            self.up_trans.add_module(f'trans_{i}', transition)
+
+            block = DenseBlock(current_channels, **dense_params_up)
+            current_channels = block.out_channels
+            self.up_dense.add_module(f'block_{i}', block)
+        # endregion
+
+        # region Final convolution
+        self.final = nn.Conv2d(current_channels, out_channels, kernel_size=1, bias=False)
+        # endregion
+
+        # region Weight initialization
+        for module in self.modules():
+            if isinstance(module, nn.Conv2d):
+                init.kaiming_normal_(module.weight)
+            elif isinstance(module, nn.BatchNorm2d):
+                module.reset_parameters()
+            elif isinstance(module, nn.Linear):
+                init.xavier_uniform_(module.weight)
+                init.constant_(module.bias, 0)
+        # endregion
 
     def forward(self, x):
-        out = self.firstconv(x)
+        res = self.features(x)
 
-        skip_connections = []
-        for i in range(len(self.down_blocks)):
-            out = self.denseBlocksDown[i](out)
-            skip_connections.append(out)
-            out = self.transDownBlocks[i](out)
+        skip_tensors = []
+        for dense, trans in zip(self.down_dense.children(), self.down_trans.children()):
+            res = dense(res)
+            skip_tensors.append(res)
+            res = trans(res)
 
-        out = self.bottleneck(out)
-        for i in range(len(self.up_blocks)):
-            skip = skip_connections.pop()
-            out = self.transUpBlocks[i](out, skip)
-            out = self.denseBlocksUp[i](out)
+        res = self.middle(res)
 
-        out = self.finalConv(out)
-        return out
+        for skip, trans, dense in zip(reversed(skip_tensors), self.up_trans.children(), self.up_dense.children()):
+            res = trans(res, skip)
+            res = dense(res)
 
-def Dense5(n_classes):
-    return FCDenseNet(
-        in_channels=3, down_blocks=(5, 5, 5, 5),
-        up_blocks=(5, 5, 5, 5), bottleneck_layers=5,
-        growth_rate=16, out_chans_first_conv=48, n_classes=n_classes)
+        res = self.final(res)
 
-
-def TiramiDense(n_classes):
-    return FCDenseNet(
-        in_channels=3, down_blocks=(4,5,7,10,12),
-        up_blocks=(12,10,7,5,4), bottleneck_layers=15,
-        growth_rate=16, out_chans_first_conv=48, n_classes=n_classes)
+        return res
 
 class DataGenerator(torch.utils.data.Dataset):
 
@@ -536,7 +560,7 @@ class ComboLOSS(nn.Module):
 """## Getting the Unet, visualizing it"""
 
 ########################################################
-learning_rate = 0.0001  # @param {type:"number"}
+learning_rate = 0.001  # @param {type:"number"}
 batchSize = 4 # @param {type:"number"}
 epochs = 500
 # earlystop_patience = 50 #@param {type:"number"}
@@ -564,7 +588,7 @@ K_path_model = []
 torch.autograd.set_detect_anomaly(True)
 for k in range(0,k_fold):
     torch.cuda.empty_cache()
-    model = Dense5(1)
+    model = FCDenseNet()
     model = model.to(device)
     optimizer = optim.SGD(model.parameters(),lr=learning_rate, momentum=0.9)
     criterion = ComboLOSS()
@@ -625,7 +649,7 @@ for k in range(0,k_fold):
         if np.mean(avg_loss) < best_loss:
             best_loss = np.mean(avg_loss)
             print('Saving model')
-            torch.save(model, os.path.join(os.getcwd(), 'RESULTS/DENSENET/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_attention_checkpoint_{:02d}_fold.pth'.format(k+1)))
+            torch.save(model, os.path.join(os.getcwd(), 'RESULTS/DENSE_IN/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_attention_checkpoint_{:02d}_fold.pth'.format(k+1)))
 
 
     #ssim_history = results.history["ssim"]
@@ -669,7 +693,7 @@ K_test_ground_truth= []
 for k in range(0, k_fold):
     print('Fold{}'.format(k+1))
     #path_model = K_path_model[k]
-    model = torch.load(os.path.join(os.getcwd(), 'RESULTS/DENSENET/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_attention_checkpoint_{:02d}_fold.pth'.format(k+1)))
+    model = torch.load(os.path.join(os.getcwd(), 'RESULTS/DENSE_IN/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_attention_checkpoint_{:02d}_fold.pth'.format(k+1)))
     model.eval()
     test_image = []
     predicted_4d = []

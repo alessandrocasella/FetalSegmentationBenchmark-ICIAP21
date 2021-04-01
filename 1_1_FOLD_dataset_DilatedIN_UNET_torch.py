@@ -259,14 +259,14 @@ class ASPP(nn.Module):
         super(ASPP, self).__init__()
         # global average pooling : init nn.AdaptiveAvgPool2d ;also forward torch.mean(,,keep_dim=True)
         self.mean = nn.AdaptiveAvgPool2d((1, 1))
-        self.conv = nn.Conv2d(in_channel, depth, 1, 1)
+        self.conv = nn.Conv2d(in_channel, depth, 1, 1, bias=True)
         # k=1 s=1 no pad
         self.atrous_block1 = nn.Conv2d(in_channel, depth, 1, 1)
-        self.atrous_block6 = nn.Conv2d(in_channel, depth, 3, 1, padding=2, dilation=2)
-        self.atrous_block12 = nn.Conv2d(in_channel, depth, 3, 1, padding=4, dilation=4)
-        self.atrous_block18 = nn.Conv2d(in_channel, depth, 3, 1, padding=8, dilation=8)
+        self.atrous_block6 = nn.Conv2d(in_channel, depth, 3, 1, padding=2, dilation=2, bias=True)
+        self.atrous_block12 = nn.Conv2d(in_channel, depth, 3, 1, padding=4, dilation=4, bias=True)
+        self.atrous_block18 = nn.Conv2d(in_channel, depth, 3, 1, padding=8, dilation=8, bias=True)
 
-        self.conv_1x1_output = nn.Conv2d(depth * 5, depth, 1, 1)
+        self.conv_1x1_output = nn.Conv2d(depth * 5, depth, 1, 1, bias=True)
 
     def forward(self, x):
         size = x.shape[2:]

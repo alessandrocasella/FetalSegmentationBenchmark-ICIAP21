@@ -19,12 +19,9 @@ import torch.nn as nn
 import torchvision
 import torch.optim as optim
 from pytorch_msssim import ssim, ms_ssim, SSIM, MS_SSIM
-#import pytorch_ssim
 from sklearn.metrics import confusion_matrix
 import h5py
 from tqdm import tqdm
-
-scaler = torch.cuda.amp.GradScaler()
 
 K_FOLD = os.path.join(os.getcwd(), 'K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET')
 print(K_FOLD)
@@ -34,6 +31,8 @@ print(K_FOLD_subfolders)
 Numpy_subfolders = [f.path for f in os.scandir(K_FOLD_subfolders[0]) if f.is_dir()]
 Numpy_subfolders.sort()
 print(Numpy_subfolders)
+
+ssim_loss = SSIM(win_size=11, win_sigma=1.5, data_range=1, size_average=True, channel=1)
 
 k_fold = len(Numpy_subfolders)
 print(k_fold)
@@ -90,7 +89,7 @@ print(val_path_mask_list)
 
 
 Result_path = os.path.join(os.getcwd(),'RESULTS')
-result_model_path = os.path.join(Result_path, 'UNET')
+result_model_path = os.path.join(Result_path, 'DENSE_IN_ASPP')
 result_dataset_path = os.path.join(result_model_path, 'K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET')
 try:
     os.mkdir(Result_path)
@@ -106,83 +105,220 @@ print(Result_path)
 print(result_model_path)
 print(result_dataset_path)
 
-"""#MY UNET 2D"""
-class DConv(nn.Module):
-    """(convolution => [BN] => ReLU) * 2"""
 
+class ASPP(nn.Module):
+    def __init__(self, in_channel=512, depth=256):
+        super(ASPP, self).__init__()
+        # global average pooling : init nn.AdaptiveAvgPool2d ;also forward torch.mean(,,keep_dim=True)
+        self.mean = nn.AdaptiveAvgPool2d((1, 1))
+        self.conv = nn.Conv2d(in_channel, depth, 1, 1, bias=True)
+        # k=1 s=1 no pad
+        self.atrous_block1 = nn.Conv2d(in_channel, depth, 1, 1)
+        self.atrous_block6 = nn.Conv2d(in_channel, depth, 3, 1, padding=2, dilation=2, bias=True)
+        self.atrous_block12 = nn.Conv2d(in_channel, depth, 3, 1, padding=4, dilation=4, bias=True)
+        self.atrous_block18 = nn.Conv2d(in_channel, depth, 3, 1, padding=8, dilation=8, bias=True)
+
+        self.conv_1x1_output = nn.Conv2d(depth * 5, depth, 1, 1, bias=True)
+
+    def forward(self, x):
+        size = x.shape[2:]
+
+        image_features = self.mean(x)
+        image_features = self.conv(image_features)
+        image_features = torch.nn.functional.interpolate(image_features, size=size, mode='bilinear')
+
+        atrous_block1 = self.atrous_block1(x)
+
+        atrous_block6 = self.atrous_block6(x)
+
+        atrous_block12 = self.atrous_block12(x)
+
+        atrous_block18 = self.atrous_block18(x)
+
+        net = self.conv_1x1_output(torch.cat([image_features, atrous_block1, atrous_block6,
+                                              atrous_block12, atrous_block18], dim=1))
+        return net
+
+
+class DenseLayer(nn.Sequential):
+    def __init__(self, in_channels, growth_rate):
+        super().__init__()
+        self.add_module('norm', nn.InstanceNorm2d(in_channels, affine=True))
+        self.add_module('relu', nn.ReLU(True))
+        self.add_module('conv', nn.Conv2d(in_channels, growth_rate, kernel_size=3,
+                                          stride=1, padding=1, bias=True))
+        self.add_module('drop', nn.Dropout2d(0.2))
+
+    def forward(self, x):
+        return super().forward(x)
+
+
+class DenseBlock(nn.Module):
+    def __init__(self, in_channels, growth_rate, n_layers, upsample=False):
+        super().__init__()
+        self.upsample = upsample
+        self.layers = nn.ModuleList([DenseLayer(
+            in_channels + i*growth_rate, growth_rate)
+            for i in range(n_layers)])
+
+    def forward(self, x):
+        if self.upsample:
+            new_features = []
+            #we pass all previous activations into each dense layer normally
+            #But we only store each dense layer's output in the new_features array
+            for layer in self.layers:
+                out = layer(x)
+                x = torch.cat([x, out], 1)
+                new_features.append(out)
+            return torch.cat(new_features,1)
+        else:
+            for layer in self.layers:
+                out = layer(x)
+                x = torch.cat([x, out], 1) # 1 = channel axis
+            return x
+
+
+class TransitionDown(nn.Sequential):
+    def __init__(self, in_channels):
+        super().__init__()
+        self.add_module('norm', nn.InstanceNorm2d(num_features=in_channels, affine=True))
+        self.add_module('relu', nn.ReLU(inplace=True))
+        self.add_module('conv', nn.Conv2d(in_channels, in_channels,
+                                          kernel_size=1, stride=1,
+                                          padding=0, bias=True))
+        self.add_module('drop', nn.Dropout2d(0.2))
+        self.add_module('maxpool', nn.AvgPool2d(2))
+
+    def forward(self, x):
+        return super().forward(x)
+
+
+class TransitionUp(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
-        self.double_conv = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(out_channels, affine=True),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(out_channels, affine=True),
-            nn.ReLU(inplace=True)
-        )
+        self.convTrans = nn.ConvTranspose2d(
+            in_channels=in_channels, out_channels=out_channels,
+            kernel_size=3, stride=2, padding=0, bias=True)
 
-    def forward(self, x):
-        return self.double_conv(x)
-
-
-
-class UNet(nn.Module):
-
-    def __init__(self, n_class):
-        super().__init__()
-
-        self.dconv_down1 = DConv(3, 64)
-        self.dconv_down2 = DConv(64, 128)
-        self.dconv_down3 = DConv(128, 256)
-        self.dconv_down4 = DConv(256, 512)
-        self.dconv_down5 = DConv(512, 1024)
-
-        self.maxpool = nn.MaxPool2d(kernel_size=2, stride=2)
-
-        self.trans1 = nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=2)
-        self.up_conv1 = DConv(1024, 512)
-
-        self.trans2 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
-        self.up_conv2 = DConv(512, 256)
-
-        self.trans3 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
-        self.up_conv3 = DConv(256, 128)
-
-        self.trans4 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        self.up_conv4 = DConv(128, 64)
-
-        self.conv_last = nn.Conv2d(64, n_class, 1)
-
-    def forward(self, x):
-        conv1 = self.dconv_down1(x)
-        x = self.maxpool(conv1)
-
-        conv2 = self.dconv_down2(x)
-        x = self.maxpool(conv2)
-
-        conv3 = self.dconv_down3(x)
-        x = self.maxpool(conv3)
-
-        conv4 = self.dconv_down4(x)
-        x = self.maxpool(conv4)
-
-        conv5 = self.dconv_down5(x)
-
-        x = self.trans1(conv5)
-        x = self.up_conv1(torch.cat([x, conv4], dim=1))
-
-        x = self.trans2(conv4)
-        x = self.up_conv2(torch.cat([x, conv3], dim=1))
-
-        x = self.trans3(x)
-        x = self.up_conv3(torch.cat([x, conv2], dim=1))
-
-        x = self.trans4(x)
-        x = self.up_conv4(torch.cat([x, conv1], dim=1))
-
-        out = self.conv_last(x)
-
+    def forward(self, x, skip):
+        out = self.convTrans(x)
+        out = center_crop(out, skip.size(2), skip.size(3))
+        out = torch.cat([out, skip], 1)
         return out
+
+
+class Bottleneck(nn.Sequential):
+    def __init__(self, in_channels, growth_rate, n_layers):
+        super().__init__()
+        self.add_module('bottleneck', DenseBlock(
+            in_channels, growth_rate, n_layers, upsample=True))
+
+    def forward(self, x):
+        return super().forward(x)
+
+
+def center_crop(layer, max_height, max_width):
+    _, _, h, w = layer.size()
+    xy1 = (w - max_width) // 2
+    xy2 = (h - max_height) // 2
+    return layer[:, :, xy2:(xy2 + max_height), xy1:(xy1 + max_width)]
+
+class FCDenseNet(nn.Module):
+    def __init__(self, in_channels=3, down_blocks=(5,5,5,5,5),
+                 up_blocks=(5,5,5,5,5), bottleneck_layers=5,
+                 growth_rate=16, out_chans_first_conv=48, n_classes=12):
+        super().__init__()
+        self.down_blocks = down_blocks
+        self.up_blocks = up_blocks
+        cur_channels_count = 0
+        skip_connection_channel_counts = []
+
+        ## First Convolution ##
+
+        self.add_module('firstconv', nn.Conv2d(in_channels=in_channels,
+                  out_channels=out_chans_first_conv, kernel_size=3,
+                  stride=1, padding=1, bias=True))
+        cur_channels_count = out_chans_first_conv
+
+        #####################
+        # Downsampling path #
+        #####################
+
+        self.denseBlocksDown = nn.ModuleList([])
+        self.transDownBlocks = nn.ModuleList([])
+        for i in range(len(down_blocks)):
+            self.denseBlocksDown.append(
+                DenseBlock(cur_channels_count, growth_rate, down_blocks[i]))
+            cur_channels_count += (growth_rate*down_blocks[i])
+            skip_connection_channel_counts.insert(0,cur_channels_count)
+            self.transDownBlocks.append(TransitionDown(cur_channels_count))
+
+        #####################
+        #     Bottleneck    #
+        #####################
+
+        self.add_module('bottleneck', ASPP(cur_channels_count, growth_rate*bottleneck_layers))
+        prev_block_channels = growth_rate*bottleneck_layers
+        cur_channels_count += prev_block_channels
+
+        #######################
+        #   Upsampling path   #
+        #######################
+
+        self.transUpBlocks = nn.ModuleList([])
+        self.denseBlocksUp = nn.ModuleList([])
+        for i in range(len(up_blocks)-1):
+            self.transUpBlocks.append(TransitionUp(prev_block_channels, prev_block_channels))
+            cur_channels_count = prev_block_channels + skip_connection_channel_counts[i]
+
+            self.denseBlocksUp.append(DenseBlock(
+                cur_channels_count, growth_rate, up_blocks[i],
+                    upsample=True))
+            prev_block_channels = growth_rate*up_blocks[i]
+            cur_channels_count += prev_block_channels
+
+        ## Final DenseBlock ##
+
+        self.transUpBlocks.append(TransitionUp(
+            prev_block_channels, prev_block_channels))
+        cur_channels_count = prev_block_channels + skip_connection_channel_counts[-1]
+
+        self.denseBlocksUp.append(DenseBlock(
+            cur_channels_count, growth_rate, up_blocks[-1],
+                upsample=False))
+        cur_channels_count += growth_rate*up_blocks[-1]
+
+        ## Softmax ##
+
+        self.finalConv = nn.Conv2d(in_channels=cur_channels_count,
+               out_channels=n_classes, kernel_size=1, stride=1,
+                   padding=0, bias=True)
+
+
+    def forward(self, x):
+        out = self.firstconv(x)
+
+        skip_connections = []
+        for i in range(len(self.down_blocks)):
+            out = self.denseBlocksDown[i](out)
+            skip_connections.append(out)
+            out = self.transDownBlocks[i](out)
+
+        out = self.bottleneck(out)
+        for i in range(len(self.up_blocks)):
+            skip = skip_connections.pop()
+            out = self.transUpBlocks[i](out, skip)
+            out = self.denseBlocksUp[i](out)
+
+        out = self.finalConv(out)
+        return out
+
+
+def FCDenseNet57(n_classes):
+    return FCDenseNet(
+        in_channels=3, down_blocks=(4, 4, 4, 4),
+        up_blocks=(4, 4, 4, 4), bottleneck_layers=4,
+        growth_rate=12, out_chans_first_conv=48, n_classes=n_classes)
 
 class DataGenerator(torch.utils.data.Dataset):
 
@@ -270,28 +406,28 @@ def diceCoeff(pred, gt, smooth=1e-5):
 class ComboLOSS(nn.Module):
     def __init__(self, weight=None, size_average=True):
         super(ComboLOSS, self).__init__()
-        self.ssim_loss = SSIM(win_size=11, win_sigma=1.5, data_range=1, size_average=True, channel=1)
 
     def forward(self, inputs, targets, smooth=1):
         # comment out if your model contains a sigmoid or equivalent activation layer
         inputs = torch.sigmoid(inputs)
+
         # flatten label and prediction tensors
         inputs_f = inputs.view(-1)
         targets_f = targets.view(-1)
 
         intersection = (inputs_f * targets_f).sum()
         dice_loss = (2. * intersection + smooth) / (inputs_f.sum() + targets_f.sum() + smooth)
-        ssim_loss = self.ssim_loss(inputs, targets)
-        Combo_loss = 1. - ( (dice_loss + ssim_loss) / 2. )
-        return Combo_loss, dice_loss, ssim_loss
+        sl = ssim_loss( inputs, targets)
+        Combo_loss = 1. - ( (dice_loss + sl) / 2. )
+        return Combo_loss, dice_loss, sl
 
 
 """## Getting the Unet, visualizing it"""
 
 ########################################################
 learning_rate = 0.001  # @param {type:"number"}
-batchSize = 16  # @param {type:"number"}
-epochs = 400
+batchSize = 8 # @param {type:"number"}
+epochs = 300
 # earlystop_patience = 50 #@param {type:"number"}
 # rule of thumb to make it 10% of number of epoch.
 
@@ -316,8 +452,8 @@ K_val_dice_history = []
 K_path_model = []
 torch.autograd.set_detect_anomaly(True)
 for k in range(0,k_fold):
-
-    model = UNet(1)
+    torch.cuda.empty_cache()
+    model = FCDenseNet57(1)
     model = model.to(device, non_blocking=True)
     optimizer = optim.SGD(model.parameters(),lr=learning_rate, momentum=0.9)
     criterion = ComboLOSS()
@@ -327,8 +463,8 @@ for k in range(0,k_fold):
 
     cell_dataset = DataGenerator(train_path_image_list[k], train_path_mask_list[k], batchSize, True)
     cell_val_dataset = DataGenerator(val_path_image_list[k], val_path_mask_list[k], batchSize, False)
-    dataloader = DataLoader(cell_dataset, batch_size=batchSize, shuffle=True, num_workers=4, pin_memory=True)
- 8   val_dataloader = DataLoader(cell_val_dataset, batch_size=batchSize, shuffle=False, num_workers=4, pin_memory=True)
+    dataloader = DataLoader(cell_dataset, batch_size=batchSize, shuffle=True, num_workers=8, pin_memory=True)
+    val_dataloader = DataLoader(cell_val_dataset, batch_size=batchSize, shuffle=False, num_workers=8, pin_memory=True)
     for epoch in range(epochs):
 
         avg_loss = []
@@ -336,19 +472,20 @@ for k in range(0,k_fold):
         #i = random.randint(0, len(cell_dataset) - 1)
         model.train()
         for iteration, (input_train, target_train) in enumerate(tqdm(dataloader)):
-            # input, target = next(iter(dataloader))
-            # input_train, target_train = Variable(batch[0]), Variable(batch[1])
-            input_train = input_train.to(device, torch.float32, non_blocking=True)
-            target_train = target_train.to(device, torch.float32, non_blocking=True)
+
+            #input, target = next(iter(dataloader))
+            #input_train, target_train = Variable(batch[0]), Variable(batch[1])
+            input_train = input_train.to(device, non_blocking=True)
+            target_train = target_train.to(device,non_blocking=True)
             optimizer.zero_grad()
             with torch.set_grad_enabled(True):
                 output = model(input_train)
                 loss, tdice, tssim = criterion(output, target_train)
                 loss.backward()
                 optimizer.step()
-
-            # loss_item = loss.item()
+            #loss_item = loss.item()
             avg_loss_train.append(loss.item())
+
 
         model.eval()
 
@@ -358,11 +495,11 @@ for k in range(0,k_fold):
 
             with torch.no_grad():
                 scores = model.forward(input_val)
-                #test = torch.sigmoid(scores)
-                #test = test.to('cpu')
-                #test = torchvision.transforms.ToPILImage()(test[0])
-                #test.save(os.path.join(os.getcwd(), '{}.png'.format(iteration)))
                 vloss, vdice, vssim = criterion(scores, target_val)
+                test = torch.sigmoid(scores)
+                test = test.to('cpu', non_blocking=True)
+                test = torchvision.transforms.ToPILImage()(test[0])
+                test.save(os.path.join(os.getcwd(), '{}.png'.format(iteration)))
                 vloss = vloss.item()
                 vdice = vdice.item()
                 vssim = vssim.item()
@@ -374,12 +511,36 @@ for k in range(0,k_fold):
         K_val_dice_history.append(vdice)
         print('Epoch {}, Loss: {:4f}, Val Loss: {:4f}'.format(epoch, np.mean(avg_loss_train), np.mean(avg_loss)))
 
-        if np.mean(avg_loss) < best_loss:
+        if (np.mean(avg_loss) < best_loss) and (np.mean(avg_loss_train) <= np.mean(avg_loss)):
             best_loss = np.mean(avg_loss)
             print('Saving model')
-            torch.save(model, os.path.join(os.getcwd(), 'RESULTS/UNET/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_checkpoint_{:02d}_fold.pth'.format(k+1)))
+            torch.save(model, os.path.join(os.getcwd(), 'RESULTS/DENSE_IN_ASPP/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_checkpoint_{:02d}_fold.pth'.format(k+1)))
 
 
+    #ssim_history = results.history["ssim"]
+    #val_ssim_history = results.history["val_ssim"]
+    #acc_history = results.history["acc"]
+    #val_acc_history = results.history["val_acc"]
+    #dice_history = results.history["dice_coeff"]
+    #val_dice_history = results.history["val_dice_coeff"]
+    '''
+    K_ssim_history.append(ssim_history)
+    K_val_ssim_history.append(val_ssim_history)
+    K_acc_history.append(acc_history)
+    K_val_acc_history.append(val_acc_history)
+    K_dice_history.append(dice_history)
+    K_val_dice_history.append(val_dice_history)
+    K_path_model.append(os.path.join(os.getcwd(),'RESULTS/ATTENTIONUNET/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_checkpoint_{:02d}_fold.h5'.format(k + 1)))
+    # saving the metrics' value in a dataset
+    with h5py.File(os.path.join(os.getcwd(), 'RESULTS/ATTENTIONUNET/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/FOLD{0}_Metrics_history_upsampling.hdf5'.format(k + 1)), 'w') as f:
+        f.create_dataset('ssim', data=ssim_history)
+        f.create_dataset('val_ssim', data=val_ssim_history)
+        f.create_dataset('acc', data=acc_history)
+        f.create_dataset('val_acc', data=val_acc_history)
+        f.create_dataset('dice', data=dice_history)
+        f.create_dataset('val_dice', data=val_dice_history)
+        f.close
+    '''
 print('The model created are: ', len(K_path_model))
 if (len(K_path_model) == k_fold):
     print('One model is created for each fold')
@@ -388,7 +549,6 @@ if (len(K_path_model) == k_fold):
 for path in K_path_model:
     print(path)
 
-
 #TESTING
 K_test_predicted = []
 K_test_thr_predicted = []
@@ -396,11 +556,9 @@ K_test_image = []
 K_test_ground_truth= []
 
 for k in range(0, k_fold):
-    model = UNet(1)
-    model = model.to(device, non_blocking=True)
     print('Fold{}'.format(k+1))
     #path_model = K_path_model[k]
-    model = torch.load(os.path.join(os.getcwd(), 'RESULTS/UNET/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_checkpoint_{:02d}_fold.pth'.format(k+1)))
+    model = torch.load(os.path.join(os.getcwd(), 'RESULTS/DENSE_IN_ASPP/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_checkpoint_{:02d}_fold.pth'.format(k+1)))
     model.eval()
     test_image = []
     predicted_4d = []
@@ -413,18 +571,14 @@ for k in range(0, k_fold):
         im = np.array(np.load(t_file_path) / 255.).astype('float32')  # trasforming the image in float 32 with np.max 0< 1
         test_image.append(im)
         im = torch.from_numpy(np.expand_dims(im,0))
-        im = im.to(device, torch.float32, non_blocking=True)
+        im = im.to(device)
         im = im.permute(0,3,1,2).float()
         with torch.no_grad():
             prediction = model(im)
-        prediction = torch.sigmoid(prediction)
-        prediction = prediction.to('cpu', non_blocking=True).numpy()
-        prediction = np.transpose(prediction, [0, 2, 3, 1])
-        #prediction = torchvision.transforms.ToPILImage()(prediction[0])
-        #prediction = np.expand_dims(np.array(prediction),0)
+        prediction = prediction.to('cpu').numpy()
         predicted_4d.append(prediction)
         # deleting the first dimension
-        p = prediction[0]        # image in float 32 with np.max 0< 1
+        p = np.transpose(prediction[0], [1, 2, 0])        # image in float 32 with np.max 0< 1
         if (p.shape != (256, 256, 1)):
             print('error shape 2')
         predicted_3d.append(p)
@@ -439,7 +593,7 @@ for k in range(0, k_fold):
     K_test_predicted.append(predicted_3d)
     K_test_image.append(test_image)
 
-if (len(K_test_predicted) != 3):
+if (len(K_test_predicted)!=3):
     print('error prediction 3d')
 if (len(K_test_thr_predicted) != 3):
     print('error prediction thr')
@@ -571,11 +725,11 @@ for k in range(0, k_fold):
     print(thr_path_fold_png)
     for l, image in enumerate(predicted):
         np.save(os.path.join(path_fold_numpy, '{:03d}.npy'.format(l)), np.asarray(image))
-        image = np.array(image[:, :, 0]*255., dtype=np.uint8)
-        im = Image.fromarray(image, 'L')
+        image = image[:, :, 0]
+        im = Image.fromarray(image, mode='L')
         im.save(os.path.join(path_fold_png, 'predicted_{:03d}.png'.format(l)))
     for l, image in enumerate(thr):
         np.save(os.path.join(thr_path_fold_numpy, '{:03d}.npy'.format(l)), np.asarray(image))
-        image = np.array(image[:, :, 0], dtype=np.uint8)
+        image = image[:, :, 0]
         im = Image.fromarray(image, mode='L')
         im.save(os.path.join(thr_path_fold_png, 'predicted_{:03d}.png'.format(l)))

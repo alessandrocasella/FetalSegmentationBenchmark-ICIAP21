@@ -546,7 +546,7 @@ K_dice_history = []
 K_val_dice_history = []
 K_path_model = []
 torch.autograd.set_detect_anomaly(True)
-for k in range(0,k_fold):
+for k in range(5,k_fold):
 
     model = AttUnet(1)
     model = model.to(device)
