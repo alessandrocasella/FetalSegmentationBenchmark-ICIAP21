@@ -84,7 +84,7 @@ print(val_path_mask_list)
 
 
 Result_path = os.path.join(os.getcwd(),'RESULTS')
-result_model_path = os.path.join(Result_path, 'DENSE')
+result_model_path = os.path.join(Result_path, 'DENSE_IN_FSP')
 result_dataset_path = os.path.join(result_model_path, 'K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET')
 try:
     os.mkdir(Result_path)
@@ -154,11 +154,27 @@ class UpSampler(nn.Module):
                                                   kernel_size=3, stride=2**scale_facotr, padding=0,
                                                      bias=True))
         self.add_module('crop', CenterCrop(256, 256))
+        self.add_module('maskconv', nn.Conv2d(self.upsample_channels, 1, kernel_size=3, stride=1, padding=1, bias=True))
 
     def forward(self, upsample):
         res_u = self.upconv(upsample)
         res_u = self.crop(res_u)
+        res_u = self.maskconv(res_u)
         return res_u
+
+
+class LastStage(nn.Module):
+    def __init__(self, stage_to_cat: int):
+        self.stage_to_cat = stage_to_cat
+        super(LastStage, self).__init__()
+        self.add_module('lastconv', nn.Conv2d(self.stage_to_cat, 1, kernel_size=1, bias=False))
+
+
+    def forward(self, x):
+
+        res = torch.cat(x, dim=1)
+        res = self.lastconv(res)
+        return res
 
 class TransitionUp(nn.Module):
     r"""
@@ -471,8 +487,9 @@ class FCDenseNet(nn.Module):
 
         # region Final convolution
         self.final = nn.Conv2d(current_channels, out_channels, kernel_size=1, bias=False)
+        self.veryfinal = nn.Conv2d(len(down_dense_num_layers) + 1, out_channels, kernel_size=1, bias=False)
         # endregion
-
+        #self.catstage = LastStage(len(down_dense_num_layers) + 1)
         # region Weight initialization
         for module in self.modules():
             if isinstance(module, nn.Conv2d):
@@ -495,12 +512,15 @@ class FCDenseNet(nn.Module):
 
         res = self.middle(res)
 
+        m_out = []
         for skip, trans, dense, ups in zip(reversed(skip_tensors), self.up_trans.children(), self.up_dense.children(), self.up_out.children()):
             res, res_u = trans(res, skip)
-            upsc =  ups(res_u)
+            m_out.append(ups(res_u))
             res = dense(res)
-
         res = self.final(res)
+        m_out.append(res)
+        res = torch.cat(m_out, dim=1)
+        res = self.veryfinal(res)
 
         return res
 
@@ -611,7 +631,7 @@ class ComboLOSS(nn.Module):
 ########################################################
 learning_rate = 0.001  # @param {type:"number"}
 batchSize = 4 # @param {type:"number"}
-epochs = 500
+epochs = 300
 # earlystop_patience = 50 #@param {type:"number"}
 # rule of thumb to make it 10% of number of epoch.
 
@@ -643,6 +663,7 @@ for k in range(0,k_fold):
     criterion = ComboLOSS()
 
     best_loss = np.inf
+    print(model)
     summary(model, input_size=(3, 256, 256))
 
     cell_dataset = DataGenerator(train_path_image_list[k], train_path_mask_list[k], batchSize, True)
@@ -698,7 +719,7 @@ for k in range(0,k_fold):
         if np.mean(avg_loss) < best_loss:
             best_loss = np.mean(avg_loss)
             print('Saving model')
-            torch.save(model, os.path.join(os.getcwd(), 'RESULTS/DENSE/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_attention_checkpoint_{:02d}_fold.pth'.format(k+1)))
+            torch.save(model, os.path.join(os.getcwd(), 'RESULTS/DENSE_IN_FSP/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_attention_checkpoint_{:02d}_fold.pth'.format(k+1)))
 
 
     #ssim_history = results.history["ssim"]
@@ -742,7 +763,7 @@ K_test_ground_truth= []
 for k in range(0, k_fold):
     print('Fold{}'.format(k+1))
     #path_model = K_path_model[k]
-    model = torch.load(os.path.join(os.getcwd(), 'RESULTS/DENSE/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_attention_checkpoint_{:02d}_fold.pth'.format(k+1)))
+    model = torch.load(os.path.join(os.getcwd(), 'RESULTS/DENSE_IN_FSP/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_attention_checkpoint_{:02d}_fold.pth'.format(k+1)))
     model.eval()
     test_image = []
     predicted_4d = []

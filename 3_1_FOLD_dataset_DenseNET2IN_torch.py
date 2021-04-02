@@ -562,7 +562,7 @@ class ComboLOSS(nn.Module):
 ########################################################
 learning_rate = 0.001  # @param {type:"number"}
 batchSize = 4 # @param {type:"number"}
-epochs = 500
+epochs = 300
 # earlystop_patience = 50 #@param {type:"number"}
 # rule of thumb to make it 10% of number of epoch.
 
