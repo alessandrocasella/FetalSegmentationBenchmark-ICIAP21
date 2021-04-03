@@ -84,7 +84,7 @@ print(val_path_mask_list)
 
 
 Result_path = os.path.join(os.getcwd(),'RESULTS')
-result_model_path = os.path.join(Result_path, 'DENSE_IN_FSP')
+result_model_path = os.path.join(Result_path, 'DENSE_ININ_FSP')
 result_dataset_path = os.path.join(result_model_path, 'K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET')
 try:
     os.mkdir(Result_path)
@@ -123,7 +123,7 @@ class TransitionDown(nn.Sequential):
         self.compression = compression
         self.out_channels = int(math.ceil(compression * in_channels))
 
-        self.add_module('norm', nn.BatchNorm2d(num_features=in_channels))
+        self.add_module('norm', nn.InstanceNorm2d(affine=True, num_features=in_channels))
         self.add_module('relu', nn.ReLU(inplace=True))
         self.add_module('conv', nn.Conv2d(in_channels, self.out_channels, kernel_size=1, bias=False))
 
@@ -259,7 +259,7 @@ class Bottleneck(nn.Sequential):
         self.out_channels = out_channels
 
         self.add_module('conv', nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False))
-        self.add_module('norm', nn.BatchNorm2d(num_features=out_channels))
+        self.add_module('norm', nn.InstanceNorm2d(affine=True, num_features=out_channels))
         self.add_module('relu', nn.ReLU(inplace=True))
 
 class DenseLayer(nn.Sequential):
@@ -281,7 +281,7 @@ class DenseLayer(nn.Sequential):
         self.in_channels = in_channels
         self.out_channels = out_channels
 
-        self.add_module('norm', nn.BatchNorm2d(num_features=in_channels))
+        self.add_module('norm', nn.InstanceNorm2d(affine=True, num_features=in_channels))
         self.add_module('relu', nn.ReLU(inplace=True))
 
         if bottleneck_ratio is not None:
@@ -622,7 +622,7 @@ class ComboLOSS(nn.Module):
         intersection = (inputs_f * targets_f).sum()
         dice_loss = (2. * intersection + smooth) / (inputs_f.sum() + targets_f.sum() + smooth)
         ssim_loss = ssim( inputs, targets, data_range=1, size_average=True, nonnegative_ssim=True )
-        Combo_loss = 2.- (dice_loss + ssim_loss)
+        Combo_loss = 1. - ( (dice_loss + ssim_loss) / 2. )
         return Combo_loss, dice_loss, ssim_loss
 
 
@@ -719,7 +719,7 @@ for k in range(0,k_fold):
         if np.mean(avg_loss) < best_loss:
             best_loss = np.mean(avg_loss)
             print('Saving model')
-            torch.save(model, os.path.join(os.getcwd(), 'RESULTS/DENSE_IN_FSP/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_attention_checkpoint_{:02d}_fold.pth'.format(k+1)))
+            torch.save(model, os.path.join(os.getcwd(), 'RESULTS/DENSE_ININ_FSP/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_attention_checkpoint_{:02d}_fold.pth'.format(k+1)))
 
 
     #ssim_history = results.history["ssim"]
@@ -763,7 +763,7 @@ K_test_ground_truth= []
 for k in range(0, k_fold):
     print('Fold{}'.format(k+1))
     #path_model = K_path_model[k]
-    model = torch.load(os.path.join(os.getcwd(), 'RESULTS/DENSE_IN_FSP/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_attention_checkpoint_{:02d}_fold.pth'.format(k+1)))
+    model = torch.load(os.path.join(os.getcwd(), 'RESULTS/DENSE_ININ_FSP/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_attention_checkpoint_{:02d}_fold.pth'.format(k+1)))
     model.eval()
     test_image = []
     predicted_4d = []

@@ -553,7 +553,9 @@ class ComboLOSS(nn.Module):
         intersection = (inputs_f * targets_f).sum()
         dice_loss = (2. * intersection + smooth) / (inputs_f.sum() + targets_f.sum() + smooth)
         ssim_loss = ssim( inputs, targets, data_range=1, size_average=True, nonnegative_ssim=True )
-        Combo_loss = 1. - ( (dice_loss + ssim_loss) / 2. )
+        Combo_loss = 2. - (dice_loss + ssim_loss)
+        #bce = nn.BCELoss()
+
         return Combo_loss, dice_loss, ssim_loss
 
 
