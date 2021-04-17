@@ -23,7 +23,7 @@ from sklearn.metrics import confusion_matrix
 import h5py
 from tqdm import tqdm
 
-K_FOLD = os.path.join(os.getcwd(), 'K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET')
+K_FOLD = os.path.join(os.getcwd(), 'KFOLD')
 print(K_FOLD)
 K_FOLD_subfolders = [f.path for f in os.scandir(K_FOLD) if f.is_dir()]
 K_FOLD_subfolders.sort()
@@ -460,7 +460,9 @@ class DataGenerator(torch.utils.data.Dataset):
 
         X = np.array(np.load(x_file_path))
         y_old = np.load(y_file_path)
-        y = np.array((y_old / np.max(y_old)) * 255).astype('uint8')
+        y_old[y_old!=34] = 0
+        #print(y_file_path, np.max(y_old))
+        y = np.array((y_old / np.max(y_old)) * 255.).astype('uint8')
         X, y = F.to_pil_image(X), F.to_pil_image(y)
         if self.aug:
         #y = np.asarray(np.dstack((y, y, y)), dtype=np.float32)
@@ -477,13 +479,23 @@ class DataGenerator(torch.utils.data.Dataset):
         #X.save(os.path.join(os.getcwd(),file_list_temp+'.jpg'))
         #y.save(os.path.join(os.getcwd(), file_list_temp + 'm.jpg'))
         x_new = np.array(X, dtype=np.float32) / 255.
-        x_new = torch.from_numpy(x_new)
-        x_new = x_new.permute(2,0,1).contiguous()
+        #x_new = torch.from_numpy(x_new)#.to('cuda')
+        #x_new = x_new.permute(2,0,1).contiguous()
+        #x_new = x_new.unsqueeze_(0)
         y_new = np.array(y, dtype=np.float32) / 255.
-        y_new = torch.from_numpy(y_new)
-        y_new = y_new.unsqueeze_(2)
-        y_new = y_new.permute(2,0,1).contiguous()
+        #y_new = torch.from_numpy(y_new)#.to('cuda')
+        y_new = np.expand_dims(y_new, 2)
+        #y_new = y_new.permute(2,0,1).contiguous()
+        #y_new = y_new.unsqueeze_(0)
         return x_new, y_new
+
+def collate_fn(batch):
+    x_batch, y_batch = [], []
+    for x,y in batch:
+        x_batch.append(x), y_batch.append(y)
+    x_batch, y_batch = torch.Tensor(x_batch), torch.Tensor(y_batch)
+    x_batch, y_batch = x_batch.permute(0, 3, 1, 2), y_batch.permute(0, 3, 1, 2)
+    return x_batch, y_batch
 
 
 def diceCoeff(pred, gt, smooth=1e-5):
@@ -512,7 +524,7 @@ class ComboLOSS(nn.Module):
         intersection = (inputs_f * targets_f).sum()
         dice_loss = (2. * intersection + smooth) / (inputs_f.sum() + targets_f.sum() + smooth)
         ssim_loss = ssim( inputs, targets, data_range=1, size_average=True, nonnegative_ssim=True )
-        Combo_loss = 1. - ( (dice_loss + ssim_loss) / 2. )
+        Combo_loss = 2. - (dice_loss + ssim_loss)
         return Combo_loss, dice_loss, ssim_loss
 
 
@@ -520,8 +532,8 @@ class ComboLOSS(nn.Module):
 
 ########################################################
 learning_rate = 0.001  # @param {type:"number"}
-batchSize = 16  # @param {type:"number"}
-epochs = 400
+batchSize = 12  # @param {type:"number"}
+epochs = 300
 # earlystop_patience = 50 #@param {type:"number"}
 # rule of thumb to make it 10% of number of epoch.
 
@@ -545,7 +557,7 @@ K_dice_history = []
 K_val_dice_history = []
 K_path_model = []
 torch.autograd.set_detect_anomaly(True)
-for k in range(7,k_fold):
+for k in range(8,k_fold):
 
     model = AttUnet(1)
     model = model.to(device)
@@ -557,8 +569,10 @@ for k in range(7,k_fold):
 
     cell_dataset = DataGenerator(train_path_image_list[k], train_path_mask_list[k], batchSize, True)
     cell_val_dataset = DataGenerator(val_path_image_list[k], val_path_mask_list[k], batchSize, False)
-    dataloader = DataLoader(cell_dataset, batch_size=batchSize, shuffle=True, num_workers=0, pin_memory=True)
-    val_dataloader = DataLoader(cell_val_dataset, batch_size=batchSize, shuffle=False, num_workers=0, pin_memory=True)
+    dataloader = DataLoader(cell_dataset, batch_size=batchSize, shuffle=True, collate_fn=collate_fn, num_workers=8,
+                            pin_memory=True)
+    val_dataloader = DataLoader(cell_val_dataset, batch_size=batchSize, shuffle=False, collate_fn=collate_fn,
+                                num_workers=8, pin_memory=True)
     for epoch in range(epochs):
 
         avg_loss = []
@@ -664,26 +678,27 @@ for k in range(0, k_fold):
     test_image_list.sort()
     for image in test_image_list:
         t_file_path = os.path.join(test_path_image_list[k], image)
-        im = np.array(np.load(t_file_path) / 255.).astype('float32')  # trasforming the image in float 32 with np.max 0< 1
+        im = np.array(np.load(t_file_path) / 255.).astype(
+            'float32')  # trasforming the image in float 32 with np.max 0< 1
         test_image.append(im)
-        im = torch.from_numpy(np.expand_dims(im,0))
+        im = torch.from_numpy(np.expand_dims(im, 0))
         im = im.to(device, torch.float32)
-        im = im.permute(0,3,1,2).float()
+        im = im.permute(0, 3, 1, 2).float()
         with torch.no_grad():
             prediction = model(im)
         prediction = torch.sigmoid(prediction)
         prediction = prediction.to('cpu').numpy()
         prediction = np.transpose(prediction, [0, 2, 3, 1])
-        #prediction = torchvision.transforms.ToPILImage()(prediction[0])
-        #prediction = np.expand_dims(np.array(prediction),0)
+        # prediction = torchvision.transforms.ToPILImage()(prediction[0])
+        # prediction = np.expand_dims(np.array(prediction),0)
         predicted_4d.append(prediction)
         # deleting the first dimension
-        p = prediction[0]        # image in float 32 with np.max 0< 1
+        p = prediction[0]  # image in float 32 with np.max 0< 1
         if (p.shape != (256, 256, 1)):
             print('error shape 2')
         predicted_3d.append(p)
         # thresholding the prediction
-        a = np.where(p >= 0.5, 255, 0) # image in float 32 with np.max =  1
+        a = np.where(p >= 0.5, 1.0, 0)  # image in float 32 with np.max =  1
         pred_thr.append(a.astype('uint8'))  # image in float 32 with np.max =  1
 
     print('The Image tested are {1} and the prediction are {0}'.format(len(predicted_4d), len(test_image)))
@@ -704,7 +719,8 @@ for k in range(0, k_fold):
     ground_truth_list.sort()
     for image in ground_truth_list:
         t_file_path = os.path.join(test_path_mask_list[k], image)
-        im = np.array(np.load(t_file_path) / 255.).astype('float32')  # trasforming the image in float 32 with np.max 0< 1
+        im = np.array(np.load(t_file_path) / 255.).astype(
+            'float32')  # trasforming the image in float 32 with np.max 0< 1
         ground_truth.append(im)
     K_test_ground_truth.append(ground_truth)
 
@@ -737,7 +753,7 @@ for k in range(0, k_fold):
     ground_truth = K_test_ground_truth[k]
     predicted = K_test_predicted[k]
     thr = K_test_thr_predicted[k]
-    fold = 'Fold{}_'.format(k+1)
+    fold = 'Fold{}_'.format(k + 1)
     print('  ')
     print('Visualizing FOLD{} prediction'.format(k + 1))
 
@@ -745,7 +761,7 @@ for k in range(0, k_fold):
     l = 0
     while (l < len(test_image)):
         fig, axs = plt.subplots(4, 4, gridspec_kw={'hspace': 0.1, 'wspace': 0.1}, figsize=(10, 10))
-        fig.suptitle('FOLD {0} - Testing'.format(k+1), fontsize=20)
+        fig.suptitle('FOLD {0} - Testing'.format(k + 1), fontsize=20)
         axs = axs.ravel()
         axs[0].imshow(test_image[l])
         axs[0].set_title('Image', fontsize=15, loc='center')
@@ -759,20 +775,20 @@ for k in range(0, k_fold):
         axs[2].set_title('Predicted', fontsize=15, loc='center')
         axs[2].set_yticklabels([])
         axs[2].set_xticklabels([])
-        axs[3].imshow(np.squeeze(np.stack((thr[l],) * 3, axis=-1)))
+        axs[3].imshow(np.squeeze(np.stack((thr[l] * 255,) * 3, axis=-1)))
         axs[3].set_title('Predicted THR', fontsize=15, loc='center')
         axs[3].set_yticklabels([])
         axs[3].set_xticklabels([])
-        axs[4].imshow(test_image[l+1])
+        axs[4].imshow(test_image[l + 1])
         axs[4].set_yticklabels([])
         axs[4].set_xticklabels([])
-        axs[5].imshow(np.squeeze(np.stack((ground_truth[l+1],) * 3, axis=-1)))
+        axs[5].imshow(np.squeeze(np.stack((ground_truth[l + 1],) * 3, axis=-1)))
         axs[5].set_yticklabels([])
         axs[5].set_xticklabels([])
-        axs[6].imshow(np.squeeze(np.stack((predicted[l+1],) * 3, axis=-1)))
+        axs[6].imshow(np.squeeze(np.stack((predicted[l + 1],) * 3, axis=-1)))
         axs[6].set_yticklabels([])
         axs[6].set_xticklabels([])
-        axs[7].imshow(np.squeeze(np.stack((thr[l+1],) * 3, axis=-1)))
+        axs[7].imshow(np.squeeze(np.stack((thr[l + 1] * 255,) * 3, axis=-1)))
         axs[7].set_yticklabels([])
         axs[7].set_xticklabels([])
         axs[8].imshow(test_image[l + 2])
@@ -784,7 +800,7 @@ for k in range(0, k_fold):
         axs[10].imshow(np.squeeze(np.stack((predicted[l + 2],) * 3, axis=-1)))
         axs[10].set_yticklabels([])
         axs[10].set_xticklabels([])
-        axs[11].imshow(np.squeeze(np.stack((thr[l + 2],) * 3, axis=-1)))
+        axs[11].imshow(np.squeeze(np.stack((thr[l + 2] * 255,) * 3, axis=-1)))
         axs[11].set_yticklabels([])
         axs[11].set_xticklabels([])
         axs[12].imshow(test_image[l + 3])
@@ -796,18 +812,18 @@ for k in range(0, k_fold):
         axs[14].imshow(np.squeeze(np.stack((predicted[l + 3],) * 3, axis=-1)))
         axs[14].set_yticklabels([])
         axs[14].set_xticklabels([])
-        axs[15].imshow(np.squeeze(np.stack((thr[l + 3],) * 3, axis=-1)))
+        axs[15].imshow(np.squeeze(np.stack((thr[l + 3] * 255,) * 3, axis=-1)))
         axs[15].set_yticklabels([])
         axs[15].set_xticklabels([])
-        l = l+4
-        #plt.show()
+        l = l + 4
+        # plt.show()
         fig.savefig(os.path.join(figure_path, fold + 'ImageVSMasks_{0}'.format(l)))
 
-#saving the prediction in png and numpy
+# saving the prediction in png and numpy
 for k in range(0, k_fold):
     predicted = K_test_predicted[k]
     thr = K_test_thr_predicted[k]
-    fold = 'Fold{}_'.format(k+1)
+    fold = 'Fold{}_'.format(k + 1)
     path_fold_numpy = os.path.join(prediction_path_numpy, fold)
     thr_path_fold_numpy = os.path.join(thr_prediction_path_numpy, fold)
     path_fold_png = os.path.join(prediction_path_png, fold)
@@ -825,11 +841,11 @@ for k in range(0, k_fold):
     print(thr_path_fold_png)
     for l, image in enumerate(predicted):
         np.save(os.path.join(path_fold_numpy, '{:03d}.npy'.format(l)), np.asarray(image))
-        image = np.array(image[:, :, 0]*255., dtype=np.uint8)
+        image = np.array(image[:, :, 0] * 255., dtype=np.uint8)
         im = Image.fromarray(image, 'L')
         im.save(os.path.join(path_fold_png, 'predicted_{:03d}.png'.format(l)))
     for l, image in enumerate(thr):
         np.save(os.path.join(thr_path_fold_numpy, '{:03d}.npy'.format(l)), np.asarray(image))
-        image = np.array(image[:, :, 0], dtype=np.uint8)
+        image = np.array(image[:, :, 0] * 255, dtype=np.uint8)
         im = Image.fromarray(image, mode='L')
         im.save(os.path.join(thr_path_fold_png, 'predicted_{:03d}.png'.format(l)))

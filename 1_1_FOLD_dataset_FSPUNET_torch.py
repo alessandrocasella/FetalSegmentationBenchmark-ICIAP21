@@ -24,10 +24,6 @@ from sklearn.metrics import confusion_matrix
 import h5py
 from tqdm import tqdm
 
-from numba import jit
-import random
-
-
 K_FOLD = os.path.join(os.getcwd(), 'K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET')
 print(K_FOLD)
 K_FOLD_subfolders = [f.path for f in os.scandir(K_FOLD) if f.is_dir()]
@@ -47,7 +43,7 @@ train_path_mask_list = []
 val_path_mask_list = []
 test_path_mask_list = []
 
-for k in range(0,k_fold):
+for k in range(3,k_fold):
     print('Fold{}'.format(k+1))
     FOLD = Numpy_subfolders[k]
     FOLD_subfolders = [ f.path for f in os.scandir(FOLD) if f.is_dir() ]
@@ -194,10 +190,10 @@ class UNet(nn.Module):
 
         self.maxpool = nn.MaxPool2d(kernel_size=2, stride=2)
 
-        self.aspp = _ASPP(512, 256, [2, 4, 6])
-        #self.conv1x1 = nn.Conv2d(128 * 5, 64, 1)
+        self.aspp = _ASPP(3, 64, [6, 8, 12])
+        self.conv1x1 = nn.Conv2d(64 * 5, 64, 1)
 
-        self.trans1 = nn.ConvTranspose2d(256*5, 512, kernel_size=2, stride=2)
+        self.trans1 = nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=2)
         self.up_conv1 = DConv(1024, 512)
 
         self.trans2 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
@@ -214,7 +210,8 @@ class UNet(nn.Module):
     def forward(self, x):
 
 
-
+        asp1 = self.aspp(x)
+        asp1 = self.conv1x1(asp1)
 
         conv1 = self.dconv_down1(x)
         x = self.maxpool(conv1)
@@ -228,7 +225,7 @@ class UNet(nn.Module):
         conv4 = self.dconv_down4(x)
         x = self.maxpool(conv4)
 
-        conv5 = self.aspp(x)
+        conv5 = self.dconv_down5(x)
 
         x = self.trans1(conv5)
         x = self.up_conv1(torch.cat([x, conv4], dim=1))
@@ -240,7 +237,7 @@ class UNet(nn.Module):
         x = self.up_conv3(torch.cat([x, conv2], dim=1))
 
         x = self.trans4(x)
-        x = self.up_conv4(torch.cat([x, conv1], dim=1))
+        x = self.up_conv4(torch.cat([x, asp1], dim=1))
 
         out = self.conv_last(x)
 
@@ -377,108 +374,108 @@ K_dice_history = []
 K_val_dice_history = []
 K_path_model = []
 torch.autograd.set_detect_anomaly(True)
-# for k in range(0,k_fold):
-#
-#     model = UNet(1)
-#     model = model.to(device)
-#     optimizer = optim.SGD(model.parameters(),lr=learning_rate, momentum=0.9, weight_decay=0.0005)
-#     lambda_sched = lambda epoch: learning_rate*(1-(epoch/epochs)**0.9)
-#     #scheduler = LambdaLR(optimizer, lambda_sched)
-#     criterion = ComboLOSS()
-#
-#     best_loss = np.inf
-#     summary(model, input_size=(3, 256, 256))
-#
-#     cell_dataset = DataGenerator(train_path_image_list[k], train_path_mask_list[k], batchSize, True)
-#     cell_val_dataset = DataGenerator(val_path_image_list[k], val_path_mask_list[k], batchSize, False)
-#     dataloader = DataLoader(cell_dataset, batch_size=batchSize, shuffle=True, num_workers=0, pin_memory=True)
-#     val_dataloader = DataLoader(cell_val_dataset, batch_size=batchSize, shuffle=False, num_workers=0, pin_memory=True)
-#     for epoch in range(epochs):
-#
-#         avg_loss = []
-#         avg_loss_train = []
-#         #i = random.randint(0, len(cell_dataset) - 1)
-#         model.train()
-#         for iteration, (input_train, target_train) in enumerate(tqdm(dataloader)):
-#
-#             #input, target = next(iter(dataloader))
-#             #input_train, target_train = Variable(batch[0]), Variable(batch[1])
-#             input_train = input_train.to(device, torch.float32)
-#             target_train = target_train.to(device,torch.float32)
-#             optimizer.zero_grad()
-#             with torch.set_grad_enabled(True):
-#                 output = model(input_train)
-#                 loss, tdice, tssim = criterion(output, target_train)
-#                 loss.backward()
-#                 optimizer.step()
-#                 #scheduler.step()
-#
-#             #loss_item = loss.item()
-#             avg_loss_train.append(loss.item())
-#
-#
-#         model.eval()
-#
-#         for iteration, (input_val, target_val) in enumerate(val_dataloader):
-#             input_val = input_val.to(device)
-#             target_val = target_val.to(device)
-#
-#             with torch.no_grad():
-#                 scores = model.forward(input_val)
-#                 vloss, vdice, vssim = criterion(scores, target_val)
-#
-#                 test = torch.sigmoid(scores)
-#                 test = test.to('cpu')
-#                 test = torchvision.transforms.ToPILImage()(test[0])
-#                 test.save(os.path.join(os.getcwd(), '{}.png'.format(iteration)))
-#                 vloss = vloss.item()
-#                 vdice = vdice.item()
-#                 vssim = vssim.item()
-#                 avg_loss.append(vloss)
-#
-#         K_ssim_history.append(tssim)
-#         K_val_ssim_history.append(vssim)
-#         K_dice_history.append(tdice)
-#         K_val_dice_history.append(vdice)
-#         print('Epoch {}, Loss: {:4f}, Val Loss: {:4f}'.format(epoch, np.mean(avg_loss_train), np.mean(avg_loss)))
-#
-#         if (np.mean(avg_loss) < best_loss) and (np.mean(avg_loss_train) <= np.mean(avg_loss)):
-#             best_loss = np.mean(avg_loss)
-#             print('Saving model')
-#             torch.save(model, os.path.join(os.getcwd(), 'RESULTS/DILATED/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_checkpoint_{:02d}_fold.pth'.format(k+1)))
-#
-#
-#     #ssim_history = results.history["ssim"]
-#     #val_ssim_history = results.history["val_ssim"]
-#     #acc_history = results.history["acc"]
-#     #val_acc_history = results.history["val_acc"]
-#     #dice_history = results.history["dice_coeff"]
-#     #val_dice_history = results.history["val_dice_coeff"]
-#     '''
-#     K_ssim_history.append(ssim_history)
-#     K_val_ssim_history.append(val_ssim_history)
-#     K_acc_history.append(acc_history)
-#     K_val_acc_history.append(val_acc_history)
-#     K_dice_history.append(dice_history)
-#     K_val_dice_history.append(val_dice_history)
-#     K_path_model.append(os.path.join(os.getcwd(),'RESULTS/DILATED/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_attention_checkpoint_{:02d}_fold.h5'.format(k + 1)))
-#     # saving the metrics' value in a dataset
-#     with h5py.File(os.path.join(os.getcwd(), 'RESULTS/DILATED/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/FOLD{0}_Metrics_history_upsampling.hdf5'.format(k + 1)), 'w') as f:
-#         f.create_dataset('ssim', data=ssim_history)
-#         f.create_dataset('val_ssim', data=val_ssim_history)
-#         f.create_dataset('acc', data=acc_history)
-#         f.create_dataset('val_acc', data=val_acc_history)
-#         f.create_dataset('dice', data=dice_history)
-#         f.create_dataset('val_dice', data=val_dice_history)
-#         f.close
-#     '''
-# print('The model created are: ', len(K_path_model))
-# if (len(K_path_model) == k_fold):
-#     print('One model is created for each fold')
-#     print('The models path are: ')
-#
-# for path in K_path_model:
-#     print(path)
+for k in range(0,k_fold):
+
+    model = UNet(1)
+    model = model.to(device)
+    optimizer = optim.SGD(model.parameters(),lr=learning_rate, momentum=0.9, weight_decay=0.0005)
+    lambda_sched = lambda epoch: learning_rate*(1-(epoch/epochs)**0.9)
+    #scheduler = LambdaLR(optimizer, lambda_sched)
+    criterion = ComboLOSS()
+
+    best_loss = np.inf
+    summary(model, input_size=(3, 256, 256))
+
+    cell_dataset = DataGenerator(train_path_image_list[k], train_path_mask_list[k], batchSize, True)
+    cell_val_dataset = DataGenerator(val_path_image_list[k], val_path_mask_list[k], batchSize, False)
+    dataloader = DataLoader(cell_dataset, batch_size=batchSize, shuffle=True, num_workers=0, pin_memory=True)
+    val_dataloader = DataLoader(cell_val_dataset, batch_size=batchSize, shuffle=False, num_workers=0, pin_memory=True)
+    for epoch in range(epochs):
+
+        avg_loss = []
+        avg_loss_train = []
+        #i = random.randint(0, len(cell_dataset) - 1)
+        model.train()
+        for iteration, (input_train, target_train) in enumerate(tqdm(dataloader)):
+
+            #input, target = next(iter(dataloader))
+            #input_train, target_train = Variable(batch[0]), Variable(batch[1])
+            input_train = input_train.to(device, torch.float32)
+            target_train = target_train.to(device,torch.float32)
+            optimizer.zero_grad()
+            with torch.set_grad_enabled(True):
+                output = model(input_train)
+                loss, tdice, tssim = criterion(output, target_train)
+                loss.backward()
+                optimizer.step()
+                #scheduler.step()
+
+            #loss_item = loss.item()
+            avg_loss_train.append(loss.item())
+
+
+        model.eval()
+
+        for iteration, (input_val, target_val) in enumerate(val_dataloader):
+            input_val = input_val.to(device)
+            target_val = target_val.to(device)
+
+            with torch.no_grad():
+                scores = model.forward(input_val)
+                vloss, vdice, vssim = criterion(scores, target_val)
+
+                test = torch.sigmoid(scores)
+                test = test.to('cpu')
+                test = torchvision.transforms.ToPILImage()(test[0])
+                test.save(os.path.join(os.getcwd(), '{}.png'.format(iteration)))
+                vloss = vloss.item()
+                vdice = vdice.item()
+                vssim = vssim.item()
+                avg_loss.append(vloss)
+
+        K_ssim_history.append(tssim)
+        K_val_ssim_history.append(vssim)
+        K_dice_history.append(tdice)
+        K_val_dice_history.append(vdice)
+        print('Epoch {}, Loss: {:4f}, Val Loss: {:4f}'.format(epoch, np.mean(avg_loss_train), np.mean(avg_loss)))
+
+        if (np.mean(avg_loss) < best_loss) and (np.mean(avg_loss_train) <= np.mean(avg_loss)):
+            best_loss = np.mean(avg_loss)
+            print('Saving model')
+            torch.save(model, os.path.join(os.getcwd(), 'RESULTS/DILATED/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_checkpoint_{:02d}_fold.pth'.format(k+1)))
+
+
+    #ssim_history = results.history["ssim"]
+    #val_ssim_history = results.history["val_ssim"]
+    #acc_history = results.history["acc"]
+    #val_acc_history = results.history["val_acc"]
+    #dice_history = results.history["dice_coeff"]
+    #val_dice_history = results.history["val_dice_coeff"]
+    '''
+    K_ssim_history.append(ssim_history)
+    K_val_ssim_history.append(val_ssim_history)
+    K_acc_history.append(acc_history)
+    K_val_acc_history.append(val_acc_history)
+    K_dice_history.append(dice_history)
+    K_val_dice_history.append(val_dice_history)
+    K_path_model.append(os.path.join(os.getcwd(),'RESULTS/DILATED/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_attention_checkpoint_{:02d}_fold.h5'.format(k + 1)))
+    # saving the metrics' value in a dataset
+    with h5py.File(os.path.join(os.getcwd(), 'RESULTS/DILATED/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/FOLD{0}_Metrics_history_upsampling.hdf5'.format(k + 1)), 'w') as f:
+        f.create_dataset('ssim', data=ssim_history)
+        f.create_dataset('val_ssim', data=val_ssim_history)
+        f.create_dataset('acc', data=acc_history)
+        f.create_dataset('val_acc', data=val_acc_history)
+        f.create_dataset('dice', data=dice_history)
+        f.create_dataset('val_dice', data=val_dice_history)
+        f.close
+    '''
+print('The model created are: ', len(K_path_model))
+if (len(K_path_model) == k_fold):
+    print('One model is created for each fold')
+    print('The models path are: ')
+
+for path in K_path_model:
+    print(path)
 
 #TESTING
 K_test_predicted = []
@@ -487,8 +484,6 @@ K_test_image = []
 K_test_ground_truth= []
 
 for k in range(0, k_fold):
-    model = UNet(1)
-    model = model.to(device)
     print('Fold{}'.format(k+1))
     #path_model = K_path_model[k]
     model = torch.load(os.path.join(os.getcwd(), 'RESULTS/DILATED/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_checkpoint_{:02d}_fold.pth'.format(k+1)))
@@ -530,7 +525,7 @@ for k in range(0, k_fold):
     K_test_predicted.append(predicted_3d)
     K_test_image.append(test_image)
 
-if (len(K_test_predicted) != 3):
+if (len(K_test_predicted)!=3):
     print('error prediction 3d')
 if (len(K_test_thr_predicted) != 3):
     print('error prediction thr')
@@ -662,11 +657,11 @@ for k in range(0, k_fold):
     print(thr_path_fold_png)
     for l, image in enumerate(predicted):
         np.save(os.path.join(path_fold_numpy, '{:03d}.npy'.format(l)), np.asarray(image))
-        image = np.array(image[:, :, 0]*255., dtype=np.uint8)
-        im = Image.fromarray(image, 'L')
+        image = image[:, :, 0]
+        im = Image.fromarray(image, mode='L')
         im.save(os.path.join(path_fold_png, 'predicted_{:03d}.png'.format(l)))
     for l, image in enumerate(thr):
         np.save(os.path.join(thr_path_fold_numpy, '{:03d}.npy'.format(l)), np.asarray(image))
-        image = np.array(image[:, :, 0], dtype=np.uint8)
+        image = image[:, :, 0]
         im = Image.fromarray(image, mode='L')
         im.save(os.path.join(thr_path_fold_png, 'predicted_{:03d}.png'.format(l)))

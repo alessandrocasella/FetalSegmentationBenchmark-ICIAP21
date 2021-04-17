@@ -23,7 +23,7 @@ from keras.utils import model_to_dot
 """# LOADING ALL PATIENTS DIRECTORIES"""
 
 #select my directory (inside there are all the images)
-Polimi_dataset = os.path.join(os.getcwd(), 'POLIMI DATASET')
+Polimi_dataset = os.path.join(os.getcwd(), 'POLIMI DATASET final')
 print(Polimi_dataset)
 
 #visualize the folders inside my directory
@@ -224,7 +224,7 @@ for x, path in enumerate(patient_image_path_list_png):
     image_resized = []
     (width, height) = (256, 256)
     for image in image_list_pil:
-        im = image.resize((width, height))
+        im = image.resize((width, height), Image.BILINEAR)
         image_resized.append(im)
     # transforming in np the image
     image_np = []
@@ -250,7 +250,7 @@ for x, path in enumerate(patient_mask_path_list_png):
     mask_resized = []
     (width, height) = (256, 256)
     for mask in mask_list_pil:
-        im = mask.resize((width, height))
+        im = mask.resize((width, height), Image.NEAREST)
         mask_resized.append(im)
         print(im.size)
     # transforming in np the image

@@ -5,18 +5,22 @@
 
 import os
 import random
-
-import numpy as np
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import torchvision
+from os import listdir
 from PIL import Image
-from matplotlib import pyplot as plt
-from pytorch_msssim import ssim
-from torch.utils.data import DataLoader
 from torchsummary import summary
 from torchvision.transforms import functional as F
+from torch.nn import functional as Fn
+from torch.utils.data import DataLoader
+from torch.autograd import Variable
+import numpy as np
+from matplotlib import pyplot as plt
+import torch
+import torch.nn as nn
+import torchvision
+import torch.optim as optim
+from pytorch_msssim import ssim, ms_ssim, SSIM, MS_SSIM
+from sklearn.metrics import confusion_matrix
+import h5py
 from tqdm import tqdm
 
 K_FOLD = os.path.join(os.getcwd(), 'K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET')
@@ -536,9 +540,9 @@ class ComboLOSS(nn.Module):
 """## Getting the Unet, visualizing it"""
 
 ########################################################
-learning_rate = 0.0001  # @param {type:"number"}
-batchSize = 4 # @param {type:"number"}
-epochs = 500
+learning_rate = 0.001  # @param {type:"number"}
+batchSize = 16 # @param {type:"number"}
+epochs = 1000
 # earlystop_patience = 50 #@param {type:"number"}
 # rule of thumb to make it 10% of number of epoch.
 
@@ -564,7 +568,7 @@ K_path_model = []
 torch.autograd.set_detect_anomaly(True)
 for k in range(0,k_fold):
     torch.cuda.empty_cache()
-    model = Dense5(1)
+    model = TiramiDense(1)
     model = model.to(device)
     optimizer = optim.SGD(model.parameters(),lr=learning_rate, momentum=0.9)
     criterion = ComboLOSS()

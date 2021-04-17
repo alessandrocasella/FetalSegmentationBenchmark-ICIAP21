@@ -23,7 +23,7 @@ from keras.utils import model_to_dot
 """# LOADING ALL PATIENTS DIRECTORIES"""
 
 #select my directory (inside there are all the images)
-Reduced_fov_Polimi_dataset = os.path.join(os.getcwd(), 'NI - REDUCED FOV - POLIMI DATASET')
+Reduced_fov_Polimi_dataset = os.path.join(os.getcwd(), 'REDUCED FOV - POLIMI DATASET')
 print(Reduced_fov_Polimi_dataset)
 
 #visualize the folders inside my directory
@@ -124,8 +124,8 @@ print(fold_path_list_png)
 """##Creating the Folds"""
 n_patient = len(Mask_numpy_subfolders)
 
-size_test = 1
-size_train = 9
+size_test = 2
+size_train = 12
 size_val = 2
 
 n_test = size_test
@@ -134,7 +134,7 @@ print(K_fold)
 
 from sklearn.model_selection import KFold
 import random
-kfold = KFold(K_fold)
+kfold = KFold(n_splits=K_fold)
 print(kfold)
 
 K_test = []

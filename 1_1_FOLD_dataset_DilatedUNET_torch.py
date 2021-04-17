@@ -24,7 +24,7 @@ from sklearn.metrics import confusion_matrix
 import h5py
 from tqdm import tqdm
 
-K_FOLD = os.path.join(os.getcwd(), 'K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET')
+K_FOLD = os.path.join(os.getcwd(), 'KFOLD')
 print(K_FOLD)
 K_FOLD_subfolders = [f.path for f in os.scandir(K_FOLD) if f.is_dir()]
 K_FOLD_subfolders.sort()
@@ -88,7 +88,7 @@ print(val_path_mask_list)
 
 
 Result_path = os.path.join(os.getcwd(),'RESULTS')
-result_model_path = os.path.join(Result_path, 'DILATED_in')
+result_model_path = os.path.join(Result_path, 'DILATED')
 result_dataset_path = os.path.join(result_model_path, 'K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET')
 try:
     os.mkdir(Result_path)
@@ -112,36 +112,15 @@ class DConv(nn.Module):
         super().__init__()
         self.double_conv = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-            nn.InstanceNorm2d(out_channels, affine=True),
+            nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
-            nn.InstanceNorm2d(out_channels, affine=True),
+            nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True)
         )
 
     def forward(self, x):
         return self.double_conv(x)
-
-class _ConvBnReLU(nn.Sequential):
-    """
-    Cascade of 2D convolution, batch norm, and ReLU.
-    """
-
-
-    def __init__(
-        self, in_ch, out_ch, kernel_size, stride, padding, dilation, relu=True
-    ):
-        super(_ConvBnReLU, self).__init__()
-        self.add_module(
-            "conv",
-            nn.Conv2d(
-                in_ch, out_ch, kernel_size, stride, padding, dilation, bias=False
-            ),
-        )
-        self.add_module("bn", torch.nn.InstanceNorm2d(out_ch, eps=1e-5, momentum=1 - 0.999, affine=True))
-
-        if relu:
-            self.add_module("relu", nn.ReLU())
 
 class _ImagePool(nn.Module):
     def __init__(self, in_ch, out_ch):
@@ -185,14 +164,14 @@ class UNet(nn.Module):
         self.dconv_down2 = DConv(64, 128)
         self.dconv_down3 = DConv(128, 256)
         self.dconv_down4 = DConv(256, 512)
+
+        self.aspp = ASPP(512,256)
+
         self.dconv_down5 = DConv(512, 1024)
 
         self.maxpool = nn.MaxPool2d(kernel_size=2, stride=2)
 
-        self.aspp = _ASPP(3, 64, [6, 8, 12])
-        self.conv1x1 = nn.Conv2d(64*5, 64, 1)
-
-        self.trans1 = nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=2)
+        self.trans1 = nn.ConvTranspose2d(1024, 256, kernel_size=2, stride=2)
         self.up_conv1 = DConv(1024, 512)
 
         self.trans2 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
@@ -207,17 +186,8 @@ class UNet(nn.Module):
         self.conv_last = nn.Conv2d(64, n_class, 1)
 
     def forward(self, x):
-
-
-
         conv1 = self.dconv_down1(x)
-
-        asp1 = self.aspp(conv1)
-        asp1 = self.conv1x1(asp1)
-
         x = self.maxpool(conv1)
-
-
 
         conv2 = self.dconv_down2(x)
         x = self.maxpool(conv2)
@@ -226,23 +196,23 @@ class UNet(nn.Module):
         x = self.maxpool(conv3)
 
         conv4 = self.dconv_down4(x)
+        asp1 = self.aspp(conv4)
         x = self.maxpool(conv4)
 
 
         conv5 = self.dconv_down5(x)
 
-
         x = self.trans1(conv5)
-        x = self.up_conv1(torch.cat([x, conv4], dim=1))
+        x = self.up_conv1(torch.cat([x, conv4, asp1], dim=1))
 
-        x = self.trans2(x)
+        x = self.trans2(conv4)
         x = self.up_conv2(torch.cat([x, conv3], dim=1))
 
         x = self.trans3(x)
         x = self.up_conv3(torch.cat([x, conv2], dim=1))
 
         x = self.trans4(x)
-        x = self.up_conv4(torch.cat([x, asp1], dim=1))
+        x = self.up_conv4(torch.cat([x, conv1], dim=1))
 
         out = self.conv_last(x)
 
@@ -294,7 +264,8 @@ class DataGenerator(torch.utils.data.Dataset):
 
         X = np.array(np.load(x_file_path))
         y_old = np.load(y_file_path)
-        y = np.array((y_old / np.max(y_old)) * 255).astype('uint8')
+        y_old[y_old!=34] = 0
+        y = np.array((y_old / np.max(y_old)) * 255.).astype('uint8')
         X, y = F.to_pil_image(X), F.to_pil_image(y)
         if self.aug:
         #y = np.asarray(np.dstack((y, y, y)), dtype=np.float32)
@@ -311,13 +282,23 @@ class DataGenerator(torch.utils.data.Dataset):
         #X.save(os.path.join(os.getcwd(),file_list_temp+'.jpg'))
         #y.save(os.path.join(os.getcwd(), file_list_temp + 'm.jpg'))
         x_new = np.array(X, dtype=np.float32) / 255.
-        x_new = torch.from_numpy(x_new)
-        x_new = x_new.permute(2,0,1).contiguous()
+        #x_new = torch.from_numpy(x_new)#.to('cuda')
+        #x_new = x_new.permute(2,0,1).contiguous()
+        #x_new = x_new.unsqueeze_(0)
         y_new = np.array(y, dtype=np.float32) / 255.
-        y_new = torch.from_numpy(y_new)
-        y_new = y_new.unsqueeze_(2)
-        y_new = y_new.permute(2,0,1).contiguous()
+        #y_new = torch.from_numpy(y_new)#.to('cuda')
+        y_new = np.expand_dims(y_new, 2)
+        #y_new = y_new.permute(2,0,1).contiguous()
+        #y_new = y_new.unsqueeze_(0)
         return x_new, y_new
+
+def collate_fn(batch):
+    x_batch, y_batch = [], []
+    for x,y in batch:
+        x_batch.append(x), y_batch.append(y)
+    x_batch, y_batch = torch.Tensor(x_batch), torch.Tensor(y_batch)
+    x_batch, y_batch = x_batch.permute(0, 3, 1, 2), y_batch.permute(0, 3, 1, 2)
+    return x_batch, y_batch
 
 
 def diceCoeff(pred, gt, smooth=1e-5):
@@ -346,7 +327,7 @@ class ComboLOSS(nn.Module):
         intersection = (inputs_f * targets_f).sum()
         dice_loss = (2. * intersection + smooth) / (inputs_f.sum() + targets_f.sum() + smooth)
         ssim_loss = ssim( inputs, targets, data_range=1, size_average=True, nonnegative_ssim=True )
-        Combo_loss = 1. - ( (dice_loss + ssim_loss) / 2. )
+        Combo_loss = 2. - (dice_loss + ssim_loss)
         return Combo_loss, dice_loss, ssim_loss
 
 
@@ -393,8 +374,10 @@ for k in range(0,k_fold):
 
     cell_dataset = DataGenerator(train_path_image_list[k], train_path_mask_list[k], batchSize, True)
     cell_val_dataset = DataGenerator(val_path_image_list[k], val_path_mask_list[k], batchSize, False)
-    dataloader = DataLoader(cell_dataset, batch_size=batchSize, shuffle=True, num_workers=0, pin_memory=True)
-    val_dataloader = DataLoader(cell_val_dataset, batch_size=batchSize, shuffle=False, num_workers=0, pin_memory=True)
+    dataloader = DataLoader(cell_dataset, batch_size=batchSize, shuffle=True, collate_fn=collate_fn, num_workers=8,
+                            pin_memory=True)
+    val_dataloader = DataLoader(cell_val_dataset, batch_size=batchSize, shuffle=False, collate_fn=collate_fn,
+                                num_workers=8, pin_memory=True)
     for epoch in range(epochs):
 
         avg_loss = []
@@ -427,10 +410,10 @@ for k in range(0,k_fold):
 
             with torch.no_grad():
                 scores = model.forward(input_val)
-                test = torch.sigmoid(scores)
-                test = test.to('cpu')
-                test = torchvision.transforms.ToPILImage()(test[0])
-                test.save(os.path.join(os.getcwd(), '{}.png'.format(iteration)))
+                #test = torch.sigmoid(scores)
+                #test = test.to('cpu')
+                #test = torchvision.transforms.ToPILImage()(test[0])
+                #test.save(os.path.join(os.getcwd(), '{}.png'.format(iteration)))
                 vloss, vdice, vssim = criterion(scores, target_val)
                 vloss = vloss.item()
                 vdice = vdice.item()
@@ -446,7 +429,7 @@ for k in range(0,k_fold):
         if np.mean(avg_loss) < best_loss:
             best_loss = np.mean(avg_loss)
             print('Saving model')
-            torch.save(model, os.path.join(os.getcwd(), 'RESULTS/DILATED_in/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_checkpoint_{:02d}_fold.pth'.format(k+1)))
+            torch.save(model, os.path.join(os.getcwd(), 'RESULTS/DILATED/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_checkpoint_{:02d}_fold.pth'.format(k+1)))
 
 
     #ssim_history = results.history["ssim"]
@@ -462,9 +445,9 @@ for k in range(0,k_fold):
     K_val_acc_history.append(val_acc_history)
     K_dice_history.append(dice_history)
     K_val_dice_history.append(val_dice_history)
-    K_path_model.append(os.path.join(os.getcwd(),'RESULTS/DILATED_in/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_attention_checkpoint_{:02d}_fold.h5'.format(k + 1)))
+    K_path_model.append(os.path.join(os.getcwd(),'RESULTS/DILATED/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_attention_checkpoint_{:02d}_fold.h5'.format(k + 1)))
     # saving the metrics' value in a dataset
-    with h5py.File(os.path.join(os.getcwd(), 'RESULTS/DILATED_in/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/FOLD{0}_Metrics_history_upsampling.hdf5'.format(k + 1)), 'w') as f:
+    with h5py.File(os.path.join(os.getcwd(), 'RESULTS/DILATED/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/FOLD{0}_Metrics_history_upsampling.hdf5'.format(k + 1)), 'w') as f:
         f.create_dataset('ssim', data=ssim_history)
         f.create_dataset('val_ssim', data=val_ssim_history)
         f.create_dataset('acc', data=acc_history)
@@ -490,7 +473,7 @@ K_test_ground_truth= []
 for k in range(0, k_fold):
     print('Fold{}'.format(k+1))
     #path_model = K_path_model[k]
-    model = torch.load(os.path.join(os.getcwd(), 'RESULTS/DILATED_in/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_checkpoint_{:02d}_fold.pth'.format(k+1)))
+    model = torch.load(os.path.join(os.getcwd(), 'RESULTS/DILATED/K FOLD- 2 - NI - REDUCED FOV - POLIMI DATASET/model_unet_checkpoint_{:02d}_fold.pth'.format(k+1)))
     model.eval()
     test_image = []
     predicted_4d = []
