@@ -11,7 +11,7 @@ import matplotlib.cm as cm
 matplotlib.use('agg')
 metrics = ['ACC', 'DSC', 'IOU', 'SENS', 'SSIM']
 colorlist = ['lightcoral', 'sandybrown', 'wheat', 'lemonchiffon', 'palegreen', 'turquoise', 'aquamarine', 'aqua', 'steelblue', 'slategrey', 'plum', 'orchid', 'hotpink']
-for fold in range(0,6):
+for fold in range(0,1):
     for metric in metrics:
         filename = os.path.join(os.getcwd(),'{}-Fold{}.csv'.format(metric, fold+1))
         f = open(filename)

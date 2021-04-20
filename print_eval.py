@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 models = os.listdir(os.path.join(os.getcwd(), 'RESULTS'))
 models.sort()
-models = models[:-1]
+#models = models[:-1]
 
 tDSC = np.empty((0,len(models)), dtype=float)
 tSSIM = np.empty((0,len(models)), dtype=float)
@@ -16,7 +16,7 @@ tACC = np.empty((0,len(models)), dtype=float)
 tSENS = np.empty((0,len(models)), dtype=float)
 tIoU = np.empty((0,len(models)), dtype=float)
 
-for i in tqdm(range(1,7)):
+for i in tqdm(range(1,2)):
 	gtPath = os.path.join(os.getcwd(), 'KFOLD', 'Numpy', 'FOLD_{0:02d}'.format(i), 'TEST', 'mask - ground truth')
 	gtLen = len(os.listdir(gtPath))
 
